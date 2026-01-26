@@ -1,0 +1,60 @@
+# AXIOM Project .claudeignore
+# Files Claude should ignore for this project
+
+# Database files (too large, use SQL queries instead)
+*.db
+*.sqlite
+data/NBA_AI_current.sqlite
+axiom.db
+
+# Generated outputs (read specific files when needed)
+outputs/
+*.json
+!config.yaml
+!package.json
+
+# Test files (usually not needed)
+test_*.py
+*_test.py
+tests/
+
+# Temp/scratch files
+nul
+schedule_fix.py
+check_games_pending.py
+manual_predictions.py
+
+# Cache
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Environment
+.env
+.env.*
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git/
+
+# Web app static assets (not needed for backend work)
+src/web_app/static/img/
+*.png
+*.jpg
+
+# Documentation site build
+docs/_site/
+docs/images/
+
+# Large data exports
+*.csv
+!data/results.csv
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
