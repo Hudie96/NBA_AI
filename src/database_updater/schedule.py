@@ -338,7 +338,10 @@ def update_schedule(season="Current", db_path=DB_PATH, force=False):
 @log_execution_time()
 def fetch_schedule(season, stage_logger=None):
     """
-    Fetches the NBA schedule for a given season.
+    Fetches the NBA schedule for a given season using nba_api.
+
+    The old stats.nba.com/stats/scheduleleaguev2 endpoint was deprecated and times out.
+    Now using nba_api.stats.endpoints.leaguegamefinder which is reliable.
 
     Parameters:
     season (str): The season to fetch the schedule for, formatted as 'XXXX-XXXX' (e.g., '2020-2021').
@@ -347,66 +350,119 @@ def fetch_schedule(season, stage_logger=None):
     Returns:
     list: A list of dictionaries, each containing details of a game. If the request fails or the data is corrupted, an empty list is returned.
     """
-    api_season = season[:5] + season[-2:]
-    endpoint = NBA_API_BASE_URL.format(season=api_season)
+    api_season = season[:5] + season[-2:]  # "2025-2026" -> "2025-26"
 
     try:
-        session = requests_retry_session(timeout=10)
-        response = session.get(endpoint, headers=NBA_API_HEADERS)
-        response.raise_for_status()
+        from nba_api.stats.endpoints import leaguegamefinder
+
+        logging.debug(f"Fetching schedule for {season} using nba_api...")
+
+        # Fetch using nba_api with 30-second timeout
+        gamefinder = leaguegamefinder.LeagueGameFinder(
+            season_nullable=api_season,
+            league_id_nullable='00',
+            timeout=30
+        )
+
+        games_df = gamefinder.get_data_frames()[0]
 
         # Track API call
         if stage_logger:
             stage_logger.log_api_call()
 
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching schedule for {season}: {e}")
-        return []
-
-    try:
-        game_dates = response.json()["leagueSchedule"]["gameDates"]
-
-        if not game_dates:
-            logging.error(f"No games found for season {season}")
+        if games_df.empty:
+            logging.warning(f"No games found for season {season}")
             return []
 
-        all_games = [game for date in game_dates for game in date["games"]]
+        logging.debug(f"Fetched {len(games_df)} game records for {season}")
 
-        keys_needed = [
-            "gameId",
-            "gameStatus",
-            "gameStatusText",  # Human-readable status from NBA API
-            "gameDateTimeUTC",  # UTC time - store this instead of EST
-            "homeTeam",
-            "awayTeam",
-        ]
+        # Convert to expected format
+        # Note: Each game appears twice in the data (once for each team)
+        # We need to deduplicate and extract proper home/away structure
 
-        all_games = [
-            {key: game.get(key, "") for key in keys_needed} for game in all_games
-        ]
+        games_dict = {}
+        for _, row in games_df.iterrows():
+            game_id = str(row['GAME_ID'])
 
-        for game in all_games:
-            game["homeTeam"] = game["homeTeam"]["teamTricode"]
-            game["awayTeam"] = game["awayTeam"]["teamTricode"]
+            # Skip if we've already processed this game
+            if game_id in games_dict:
+                # Add the second team's info
+                matchup = str(row['MATCHUP'])
+                if ' @ ' in matchup:
+                    # This team is away
+                    games_dict[game_id]['awayTeam'] = row['TEAM_ABBREVIATION']
+                else:
+                    # This team is home
+                    games_dict[game_id]['homeTeam'] = row['TEAM_ABBREVIATION']
+                continue
 
-        season_type_codes = {
-            "001": "Pre Season",
-            "002": "Regular Season",
-            "003": "All-Star",
-            "004": "Post Season",
-            "005": "Post Season",  # Play-In
-        }
+            # First time seeing this game - extract basic info
+            matchup = str(row['MATCHUP'])
+            wl = row.get('WL', None)
 
-        for game in all_games:
-            game["seasonType"] = season_type_codes.get(game["gameId"][:3], "Unknown")
-            # Keep numeric gameStatus (1, 2, 3) as-is - no mapping needed
-            # gameStatusText is human-readable ("Final", "5:00 pm ET", etc.)
-            game["season"] = season
+            # Determine home/away from matchup string
+            if ' @ ' in matchup:
+                # Format: "TEAM @ OPPONENT" - this team is away
+                home_team = matchup.split(' @ ')[1]
+                away_team = row['TEAM_ABBREVIATION']
+            elif ' vs. ' in matchup:
+                # Format: "TEAM vs. OPPONENT" - this team is home
+                home_team = row['TEAM_ABBREVIATION']
+                away_team = matchup.split(' vs. ')[1]
+            else:
+                # Fallback parsing
+                parts = matchup.split()
+                if len(parts) >= 3:
+                    home_team = parts[2] if '@' in matchup else parts[0]
+                    away_team = parts[0] if '@' in matchup else parts[2]
+                else:
+                    home_team = row['TEAM_ABBREVIATION']
+                    away_team = 'UNK'
+
+            # Determine game status
+            # If WL exists (W or L), game is final, otherwise scheduled
+            if wl is not None:
+                game_status = 3  # Final
+                status_text = 'Final'
+            else:
+                game_status = 1  # Scheduled
+                status_text = 'Scheduled'
+
+            # Season type from game ID
+            season_type_codes = {
+                '001': 'Pre Season',
+                '002': 'Regular Season',
+                '003': 'All-Star',
+                '004': 'Post Season',
+                '005': 'Post Season',  # Play-In
+            }
+            season_type = season_type_codes.get(game_id[:3], 'Unknown')
+
+            games_dict[game_id] = {
+                'gameId': game_id,
+                'gameStatus': game_status,
+                'gameStatusText': status_text,
+                'gameDateTimeUTC': str(row['GAME_DATE']) + 'T00:00:00Z',
+                'homeTeam': home_team,
+                'awayTeam': away_team,
+                'season': season,
+                'seasonType': season_type
+            }
+
+        all_games = list(games_dict.values())
+        logging.debug(f"Processed {len(all_games)} unique games for {season}")
 
         return all_games
 
-    except (KeyError, TypeError) as e:
-        logging.error(f"Error processing schedule data for {season}: {e}")
+    except ImportError as e:
+        logging.error(f"nba_api not installed: {e}")
+        logging.error("Install with: pip install nba_api")
+        return []
+
+    except Exception as e:
+        logging.error(f"Error fetching schedule for {season}: {e}")
+        import traceback
+        logging.debug(traceback.format_exc())
         return []
 
 
