@@ -32,30 +32,65 @@ from src.config import config
 DB_PATH = config["database"]["path"]
 
 
-def get_props_picks(conn, target_date=None):
+def get_props_picks(conn, target_date=None, verified_only=False):
     """Get prop picks for today."""
     if target_date is None:
         target_date = date.today().isoformat()
 
-    picks = pd.read_sql("""
-        SELECT player_name, opponent, prop_type, line, projection, edge_pct, pick,
-               confidence, stat_tier, is_top_play
-        FROM props_edges
-        WHERE date = ?
-        ORDER BY
-            is_top_play DESC,
-            CASE stat_tier
-                WHEN 'S_TIER' THEN 1
-                WHEN 'A_TIER' THEN 2
-                ELSE 3
-            END,
-            CASE confidence
-                WHEN 'HIGH' THEN 1
-                WHEN 'MEDIUM' THEN 2
-                WHEN 'LOW' THEN 3
-            END,
-            ABS(edge_pct) DESC
-    """, conn, params=(target_date,))
+    # Check if verification table exists and has data for today
+    has_verification = False
+    try:
+        check = pd.read_sql("""
+            SELECT COUNT(*) as cnt FROM picks_verification WHERE date = ?
+        """, conn, params=(target_date,))
+        has_verification = check.iloc[0]["cnt"] > 0
+    except:
+        pass
+
+    if has_verification and verified_only:
+        # Join with verification results, only show CONFIRM and FLAG
+        picks = pd.read_sql("""
+            SELECT e.player_name, e.opponent, e.prop_type, e.line, e.projection,
+                   e.edge_pct, e.pick, e.confidence, e.stat_tier, e.is_top_play,
+                   v.verdict, v.ai_confidence, v.reason
+            FROM props_edges e
+            JOIN picks_verification v
+              ON e.date = v.date
+              AND e.player_name = v.player_name
+              AND e.prop_type = v.prop_type
+            WHERE e.date = ?
+              AND v.verdict IN ('CONFIRM', 'FLAG')
+            ORDER BY
+                CASE v.verdict WHEN 'CONFIRM' THEN 1 ELSE 2 END,
+                e.is_top_play DESC,
+                CASE e.stat_tier
+                    WHEN 'S_TIER' THEN 1
+                    WHEN 'A_TIER' THEN 2
+                    ELSE 3
+                END,
+                ABS(e.edge_pct) DESC
+        """, conn, params=(target_date,))
+    else:
+        # Standard query without verification
+        picks = pd.read_sql("""
+            SELECT player_name, opponent, prop_type, line, projection, edge_pct, pick,
+                   confidence, stat_tier, is_top_play
+            FROM props_edges
+            WHERE date = ?
+            ORDER BY
+                is_top_play DESC,
+                CASE stat_tier
+                    WHEN 'S_TIER' THEN 1
+                    WHEN 'A_TIER' THEN 2
+                    ELSE 3
+                END,
+                CASE confidence
+                    WHEN 'HIGH' THEN 1
+                    WHEN 'MEDIUM' THEN 2
+                    WHEN 'LOW' THEN 3
+                END,
+                ABS(edge_pct) DESC
+        """, conn, params=(target_date,))
 
     return picks
 

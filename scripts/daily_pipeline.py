@@ -206,6 +206,26 @@ def generate_daily_card(target_date=None, card_format="console"):
         return None
 
 
+def run_ai_verification(target_date):
+    """Step 6b: Run AI verification on picks (optional)."""
+    print_step("6b", "Running AI Pick Verification")
+
+    try:
+        from scripts.ai_verify_picks import verify_picks, display_results
+
+        conn = sqlite3.connect(DB_PATH)
+        results = verify_picks(conn, target_date=target_date, dry_run=False, verbose=True)
+
+        if results:
+            display_results(results)
+
+        conn.close()
+        return True, results
+    except Exception as e:
+        print(f"  Warning: AI verification failed: {e}")
+        return False, []
+
+
 def main():
     parser = argparse.ArgumentParser(description="AXIOM Daily Pipeline")
     parser.add_argument("--date", type=str, help="Target date (YYYY-MM-DD)")
@@ -213,6 +233,7 @@ def main():
     parser.add_argument("--props-only", action="store_true", help="Only run props analysis")
     parser.add_argument("--spreads-only", action="store_true", help="Only run spreads analysis")
     parser.add_argument("--with-nuggets", action="store_true", help="Include stat nuggets generation")
+    parser.add_argument("--with-verification", action="store_true", help="Run AI verification on picks")
     parser.add_argument("--format", type=str, default="console", choices=["console", "discord"],
                         help="Card output format")
     parser.add_argument("--season", type=str, default="2024-25", help="Season")
@@ -243,6 +264,10 @@ def main():
         conn = sqlite3.connect(DB_PATH)
         generate_stat_nuggets(conn)
         conn.close()
+
+    # Step 6b: AI verification (optional)
+    if args.with_verification and not args.spreads_only:
+        run_ai_verification(target_date)
 
     # Step 7: Generate daily card
     generate_daily_card(target_date=target_date, card_format=args.format)
