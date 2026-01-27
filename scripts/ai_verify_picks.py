@@ -28,6 +28,13 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 from src.config import config
 
 DB_PATH = config["database"]["path"]
