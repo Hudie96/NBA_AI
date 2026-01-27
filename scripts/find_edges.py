@@ -34,18 +34,21 @@ from scripts.project_props import (
     get_dvp_adjustment,
     get_vs_opponent_avg,
     build_player_positions_table,
-    STATS
+    STATS,
+    STAT_COLS
 )
 
 DB_PATH = config["database"]["path"]
 
-# Backtest-validated stats (55%+ hit rate)
-# PTS: 55.3%, AST: 55.4%, 3PM: 53.5%, REB: 51.8%
-PROFITABLE_STATS = ["PTS", "AST"]
+# Backtest-validated stats (30-day backtest)
+# Individual: PTS: 56.2%, REB: 55.3%, AST: 54.6%, 3PM: 54.3%
+# Combos (15%+ edge): RA: 58.6%, PRA: 57.8%, PA: 57.3%, PR: 56.1%
+# Excluded: STL: 52.5%, BLK: 53.2% (marginal)
+PROFITABLE_STATS = ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA"]
 
 # Edge thresholds - updated based on backtest results
-# 15%+ edges: 56.4% hit rate (best performance)
-# 10-15%: 52.8%, 5-10%: 53.3%, 3-5%: 52.7%
+# 15%+ edges: 56.1% hit rate (best performance)
+# 10-15%: 54.9%, 5-10%: 52.3%, 3-5%: 52.4%
 EDGE_THRESHOLDS = {
     "HIGH": {"edge_pct": 15, "min_games": 20},    # 56.4% hit rate
     "MEDIUM": {"edge_pct": 10, "min_games": 15},  # ~53% hit rate
@@ -263,21 +266,21 @@ def display_edge(edge):
 def test_edge_finder(conn, all_stats=False):
     """Test edge finder with sample data."""
     print("=== EDGE FINDER TEST ===")
-    print(f"Mode: {'All stats' if all_stats else 'PTS/AST only (backtest-validated)'}\n")
+    print(f"Mode: {'All stats' if all_stats else 'Validated stats (PTS/REB/AST/3PM + combos)'}\n")
 
     build_player_positions_table(conn)
 
     # Sample lines (would come from sportsbook in production)
-    # Focus on PTS and AST lines (backtest-validated)
+    # Includes individual stats and combo props (PRA, PR, PA, RA)
     test_cases = [
         # Player, Opponent, {stat: line}
-        ("LeBron James", "LAC", {"PTS": 22.5, "AST": 7.5, "REB": 6.5}),
-        ("Stephen Curry", "LAL", {"PTS": 25.5, "AST": 6.5, "3PM": 4.5}),
-        ("Jayson Tatum", "MIA", {"PTS": 27.5, "AST": 5.5, "REB": 8.5}),
-        ("Anthony Edwards", "DEN", {"PTS": 26.5, "AST": 4.5}),
-        ("Devin Booker", "DAL", {"PTS": 24.5, "AST": 6.5, "3PM": 2.5}),
-        ("Trae Young", "CHI", {"PTS": 24.5, "AST": 10.5}),
-        ("James Harden", "MEM", {"PTS": 20.5, "AST": 8.5}),
+        ("LeBron James", "LAC", {"PTS": 22.5, "AST": 7.5, "REB": 6.5, "PRA": 36.5}),
+        ("Stephen Curry", "LAL", {"PTS": 25.5, "AST": 6.5, "3PM": 4.5, "PA": 32.5}),
+        ("Jayson Tatum", "MIA", {"PTS": 27.5, "AST": 5.5, "REB": 8.5, "PRA": 41.5}),
+        ("Anthony Edwards", "DEN", {"PTS": 26.5, "AST": 4.5, "PR": 32.5}),
+        ("Devin Booker", "DAL", {"PTS": 24.5, "AST": 6.5, "3PM": 2.5, "PA": 31.5}),
+        ("Trae Young", "CHI", {"PTS": 24.5, "AST": 10.5, "PA": 35.5, "RA": 14.5}),
+        ("James Harden", "MEM", {"PTS": 20.5, "AST": 8.5, "PRA": 35.5}),
     ]
 
     all_edges = []

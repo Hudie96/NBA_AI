@@ -85,6 +85,8 @@ def transform_game_logs(df):
         "minutes": df["MIN"],
         "points": df["PTS"],
         "rebounds": df["REB"],
+        "offensive_rebounds": df["OREB"],
+        "defensive_rebounds": df["DREB"],
         "assists": df["AST"],
         "steals": df["STL"],
         "blocks": df["BLK"],
@@ -96,6 +98,16 @@ def transform_game_logs(df):
         "ft_made": df["FTM"],
         "ft_attempted": df["FTA"],
         "plus_minus": df["PLUS_MINUS"],
+        "personal_fouls": df["PF"],
+        "fouls_drawn": df["PFD"],
+        "fantasy_points": df["NBA_FANTASY_PTS"],
+        "double_doubles": df["DD2"],
+        "triple_doubles": df["TD3"],
+        # Calculated combo stats
+        "pts_reb_ast": df["PTS"] + df["REB"] + df["AST"],
+        "pts_reb": df["PTS"] + df["REB"],
+        "pts_ast": df["PTS"] + df["AST"],
+        "reb_ast": df["REB"] + df["AST"],
     })
 
     return transformed

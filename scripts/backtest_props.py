@@ -31,12 +31,30 @@ from src.config import config
 
 DB_PATH = config["database"]["path"]
 
+# Core stats for backtest
 STATS = ["PTS", "REB", "AST", "3PM"]
+
+# Combo props (calculated columns in DB)
+STATS_COMBO = ["PRA", "PR", "PA", "RA"]
+
+# All stats including combos
+STATS_ALL = STATS + STATS_COMBO
+
 STAT_COLS = {
     "PTS": "points",
     "REB": "rebounds",
     "AST": "assists",
-    "3PM": "threes_made"
+    "3PM": "threes_made",
+    "STL": "steals",
+    "BLK": "blocks",
+    "TOV": "turnovers",
+    "OREB": "offensive_rebounds",
+    "DREB": "defensive_rebounds",
+    "PRA": "pts_reb_ast",
+    "PR": "pts_reb",
+    "PA": "pts_ast",
+    "RA": "reb_ast",
+    "FPT": "fantasy_points",
 }
 
 
@@ -156,7 +174,9 @@ def run_backtest(conn, num_players=50, games_per_player=15):
 
         # Get player's games (need enough history)
         all_games = pd.read_sql("""
-            SELECT game_date, opponent, points, rebounds, assists, threes_made
+            SELECT game_date, opponent, points, rebounds, assists, threes_made,
+                   steals, blocks, turnovers, offensive_rebounds, defensive_rebounds,
+                   pts_reb_ast, pts_reb, pts_ast, reb_ast, fantasy_points
             FROM player_game_logs
             WHERE player_name = ?
             ORDER BY game_date DESC

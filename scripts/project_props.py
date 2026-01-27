@@ -31,15 +31,34 @@ from src.config import config
 
 DB_PATH = config["database"]["path"]
 
-# Stats we project
-STATS = ["PTS", "REB", "AST", "3PM"]
+# Stats we project (core + combo props)
+STATS = ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA"]
+
+# Extended stats available for projection
+STATS_EXTENDED = [
+    "PTS", "REB", "AST", "3PM",       # Core props
+    "STL", "BLK", "TOV",              # Secondary props
+    "PRA", "PR", "PA", "RA",          # Combo props
+    "OREB", "DREB",                   # Rebound splits
+    "FPT",                            # Fantasy points
+]
 
 # Column mapping for stats
 STAT_COLS = {
     "PTS": "points",
     "REB": "rebounds",
     "AST": "assists",
-    "3PM": "threes_made"
+    "3PM": "threes_made",
+    "STL": "steals",
+    "BLK": "blocks",
+    "TOV": "turnovers",
+    "OREB": "offensive_rebounds",
+    "DREB": "defensive_rebounds",
+    "PRA": "pts_reb_ast",
+    "PR": "pts_reb",
+    "PA": "pts_ast",
+    "RA": "reb_ast",
+    "FPT": "fantasy_points",
 }
 
 
@@ -94,15 +113,40 @@ def get_season_avg(player_name, stat, conn):
 
 def get_vs_opponent_avg(player_name, opponent, stat, conn):
     """Get player's average vs specific opponent."""
-    col = f"avg_{stat.lower().replace('3pm', '3pm')}"
-    if stat == "PTS":
-        col = "avg_pts"
-    elif stat == "REB":
-        col = "avg_reb"
-    elif stat == "AST":
-        col = "avg_ast"
-    elif stat == "3PM":
-        col = "avg_3pm"
+    # Map stat to column(s) in player_vs_team
+    stat_map = {
+        "PTS": "avg_pts",
+        "REB": "avg_reb",
+        "AST": "avg_ast",
+        "3PM": "avg_3pm",
+    }
+
+    # Handle combo stats
+    if stat in ["PRA", "PR", "PA", "RA"]:
+        df = pd.read_sql("""
+            SELECT avg_pts, avg_reb, avg_ast, games
+            FROM player_vs_team
+            WHERE player_name = ? AND opponent = ?
+        """, conn, params=(player_name, opponent))
+
+        if df.empty:
+            return None, 0
+
+        row = df.iloc[0]
+        if stat == "PRA":
+            val = row["avg_pts"] + row["avg_reb"] + row["avg_ast"]
+        elif stat == "PR":
+            val = row["avg_pts"] + row["avg_reb"]
+        elif stat == "PA":
+            val = row["avg_pts"] + row["avg_ast"]
+        elif stat == "RA":
+            val = row["avg_reb"] + row["avg_ast"]
+        return val, row["games"]
+
+    # Individual stat
+    col = stat_map.get(stat)
+    if col is None:
+        return None, 0
 
     df = pd.read_sql(f"""
         SELECT {col} as val, games
@@ -120,6 +164,25 @@ def get_dvp_adjustment(opponent, position, stat, conn):
     Get Defense vs Position adjustment.
     Returns the diff_from_avg (positive = opponent allows more than average).
     """
+    # Handle combo stats by summing components
+    if stat == "PRA":
+        pts_adj = get_dvp_adjustment(opponent, position, "PTS", conn)
+        reb_adj = get_dvp_adjustment(opponent, position, "REB", conn)
+        ast_adj = get_dvp_adjustment(opponent, position, "AST", conn)
+        return pts_adj + reb_adj + ast_adj
+    elif stat == "PR":
+        pts_adj = get_dvp_adjustment(opponent, position, "PTS", conn)
+        reb_adj = get_dvp_adjustment(opponent, position, "REB", conn)
+        return pts_adj + reb_adj
+    elif stat == "PA":
+        pts_adj = get_dvp_adjustment(opponent, position, "PTS", conn)
+        ast_adj = get_dvp_adjustment(opponent, position, "AST", conn)
+        return pts_adj + ast_adj
+    elif stat == "RA":
+        reb_adj = get_dvp_adjustment(opponent, position, "REB", conn)
+        ast_adj = get_dvp_adjustment(opponent, position, "AST", conn)
+        return reb_adj + ast_adj
+
     df = pd.read_sql("""
         SELECT diff_from_avg
         FROM defense_vs_position
