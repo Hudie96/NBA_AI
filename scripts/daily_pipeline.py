@@ -10,13 +10,15 @@ Steps:
 3. Rebuild player vs team history
 4. Run team spread picks (existing system)
 5. Run props edge finder (PTS/AST, 15%+ edges)
-6. Output daily card
+6. Generate stat nuggets (optional)
+7. Output daily card
 
 Usage:
     python scripts/daily_pipeline.py
     python scripts/daily_pipeline.py --date 2025-01-26
     python scripts/daily_pipeline.py --skip-update  # Skip data refresh
     python scripts/daily_pipeline.py --props-only   # Only run props
+    python scripts/daily_pipeline.py --with-nuggets # Include stat nuggets
 """
 import argparse
 import sqlite3
@@ -143,108 +145,65 @@ def run_props_finder(target_date=None):
         return False, []
 
 
-def generate_daily_card(spread_picks=None, prop_edges=None, target_date=None):
-    """Step 6: Generate the daily pick card."""
-    print_step(6, "Generating Daily Card")
-
-    if target_date is None:
-        target_date = date.today().strftime("%b %d")
-    else:
-        target_date = datetime.strptime(target_date, "%Y-%m-%d").strftime("%b %d")
-
-    card = []
-    card.append(f"=== AXIOM DAILY CARD - {target_date} ===")
-    card.append("")
-
-    # Team Spread Section
-    card.append("[SPREAD PICKS] (Team System)")
-    card.append("-" * 35)
-
-    conn = sqlite3.connect(DB_PATH)
-
-    # Try to get today's spread picks from flag system output
-    try:
-        # Check for recent flagged picks
-        from scripts.flag_system import FLAG_THRESHOLDS
-        card.append("  Run daily_predictions.py for spread picks")
-        card.append("  GREEN = 8+ score, YELLOW = 5-7 score")
-    except:
-        card.append("  No spread picks available")
-
-    card.append("")
-
-    # Props Section
-    card.append("[PROP PICKS] (Player System - Backtest Validated)")
-    card.append("-" * 35)
-
-    if prop_edges:
-        # Sort by confidence
-        sorted_edges = sorted(prop_edges, key=lambda x: x["confidence_score"], reverse=True)
-
-        high_edges = [e for e in sorted_edges if e["confidence"] == "HIGH"]
-        med_edges = [e for e in sorted_edges if e["confidence"] == "MEDIUM"]
-
-        # Show HIGH confidence first
-        for edge in high_edges[:3]:
-            stars = "[***]"
-            card.append(f"  {stars} {edge['player_name']} {edge['pick']} {edge['line']} {edge['prop_type']}")
-            card.append(f"      vs {edge['opponent']} | Proj: {edge['projection']} | Edge: {edge['edge_pct']:+.1f}%")
-            card.append("")
-
-        # Show MEDIUM confidence
-        for edge in med_edges[:3]:
-            stars = "[**]"
-            card.append(f"  {stars} {edge['player_name']} {edge['pick']} {edge['line']} {edge['prop_type']}")
-            card.append(f"      vs {edge['opponent']} | Proj: {edge['projection']} | Edge: {edge['edge_pct']:+.1f}%")
-            card.append("")
-
-        if not high_edges and not med_edges:
-            card.append("  No HIGH/MEDIUM confidence edges found")
-            card.append("  (Require 15%+ edge on PTS/AST)")
-    else:
-        card.append("  No prop edges available")
-
-    card.append("")
-
-    # Results tracking
-    card.append("[RESULTS TRACKING]")
-    card.append("-" * 35)
+def generate_stat_nuggets(conn):
+    """Step 6: Generate stat nuggets (optional)."""
+    print_step(6, "Generating Stat Nuggets")
 
     try:
-        # Get props results summary
-        results = pd.read_sql("""
-            SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses
-            FROM props_results
-            WHERE result IS NOT NULL
-        """, conn)
+        from scripts.generate_nuggets import generate_all_nuggets, display_nuggets
 
-        if results.iloc[0]["total"] > 0:
-            wins = results.iloc[0]["wins"]
-            losses = results.iloc[0]["losses"]
-            total = wins + losses
-            pct = wins / total * 100 if total > 0 else 0
-            card.append(f"  Props: {wins}W-{losses}L ({pct:.1f}%)")
+        nuggets = generate_all_nuggets(conn, top_per_type=3)
+        print(f"\n  Found {len(nuggets)} stat nuggets")
+
+        # Show top 5 nuggets
+        if nuggets:
+            print("\n  TOP NUGGETS:")
+            for n in sorted(nuggets, key=lambda x: x.get("score", 0), reverse=True)[:5]:
+                print(f"    - {n['hook']}")
+
+        return nuggets
+    except Exception as e:
+        print(f"  Warning: Could not generate nuggets: {e}")
+        return []
+
+
+def generate_daily_card(target_date=None, card_format="console"):
+    """Step 7: Generate the daily pick card using generate_card module."""
+    print_step(7, "Generating Daily Card")
+
+    try:
+        from scripts.generate_card import (
+            get_props_picks, get_props_results, get_top_nugget,
+            generate_console_card, generate_discord_card
+        )
+
+        conn = sqlite3.connect(DB_PATH)
+
+        # Use ISO format for database queries
+        if target_date is None:
+            target_date = date.today().isoformat()
+
+        # Get data
+        picks = get_props_picks(conn, target_date)
+        results, overall = get_props_results(conn)
+        nugget = get_top_nugget(conn)
+
+        # Generate card
+        if card_format == "discord":
+            card = generate_discord_card(picks, results, overall, nugget, target_date)
         else:
-            card.append("  Props: No results yet")
-    except:
-        card.append("  Props: No results yet")
+            card = generate_console_card(picks, results, overall, nugget, target_date)
 
-    card.append("")
-    card.append("=" * 40)
-    card.append("Backtest: 15%+ edges on PTS/AST = 56.4% hit rate")
-    card.append("=" * 40)
+        print(card)
 
-    conn.close()
+        conn.close()
+        return card
 
-    # Print the card
-    print("\n")
-    for line in card:
-        print(line)
-
-    return card
+    except Exception as e:
+        print(f"  Warning: Could not generate card: {e}")
+        # Fallback to simple output
+        print("\n  Run 'python scripts/generate_card.py' for full card")
+        return None
 
 
 def main():
@@ -253,6 +212,9 @@ def main():
     parser.add_argument("--skip-update", action="store_true", help="Skip data refresh")
     parser.add_argument("--props-only", action="store_true", help="Only run props analysis")
     parser.add_argument("--spreads-only", action="store_true", help="Only run spreads analysis")
+    parser.add_argument("--with-nuggets", action="store_true", help="Include stat nuggets generation")
+    parser.add_argument("--format", type=str, default="console", choices=["console", "discord"],
+                        help="Card output format")
     parser.add_argument("--season", type=str, default="2024-25", help="Season")
 
     args = parser.parse_args()
@@ -276,8 +238,14 @@ def main():
     if not args.spreads_only:
         success, prop_edges = run_props_finder(target_date)
 
-    # Step 6: Generate daily card
-    generate_daily_card(prop_edges=prop_edges, target_date=target_date)
+    # Step 6: Stat nuggets (optional)
+    if args.with_nuggets and not args.spreads_only:
+        conn = sqlite3.connect(DB_PATH)
+        generate_stat_nuggets(conn)
+        conn.close()
+
+    # Step 7: Generate daily card
+    generate_daily_card(target_date=target_date, card_format=args.format)
 
     print_header("PIPELINE COMPLETE")
 
