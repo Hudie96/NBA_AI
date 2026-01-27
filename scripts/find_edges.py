@@ -4,10 +4,16 @@ Props Edge Finder
 Task 2.2 from AXIOM_ACTION_PLAN_v2.md
 Flags props where our projection differs significantly from the line.
 
-BACKTEST-OPTIMIZED (Task 4.2 results):
-- Focus on PTS and AST (55%+ hit rate)
-- Target 15%+ edges (56.4% hit rate)
-- Avoid REB props (51.8% - barely break-even)
+BACKTEST-OPTIMIZED (30-day backtest, 21,000+ bets):
+
+S-TIER (combo props) - 15%+ edges hit at 60.1%:
+  RA: 58.6%, PRA: 57.8%, PA: 57.3%, PR: 56.1%
+
+A-TIER (individual props) - solid performers:
+  PTS: 56.2%, REB: 55.3%, AST: 54.6%, 3PM: 54.3%
+
+DROPPED (not profitable after vig):
+  STL: 52.5%, BLK: 53.2%
 
 Usage:
     python scripts/find_edges.py --player "LeBron James" --opponent LAC --stat PTS --line 24.5
@@ -40,42 +46,68 @@ from scripts.project_props import (
 
 DB_PATH = config["database"]["path"]
 
-# Backtest-validated stats (30-day backtest)
-# Individual: PTS: 56.2%, REB: 55.3%, AST: 54.6%, 3PM: 54.3%
-# Combos (15%+ edge): RA: 58.6%, PRA: 57.8%, PA: 57.3%, PR: 56.1%
-# Excluded: STL: 52.5%, BLK: 53.2% (marginal)
-PROFITABLE_STATS = ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA"]
+# =============================================================================
+# STAT TIERS (based on 30-day backtest, 21,000+ bets)
+# =============================================================================
 
-# Edge thresholds - updated based on backtest results
-# 15%+ edges: 56.1% hit rate (best performance)
-# 10-15%: 54.9%, 5-10%: 52.3%, 3-5%: 52.4%
+# S-TIER: Combo props - best performers, 15%+ edges hit at 60.1%
+S_TIER_STATS = ["RA", "PRA", "PA", "PR"]
+
+# A-TIER: Individual props - solid performers
+A_TIER_STATS = ["PTS", "REB", "AST", "3PM"]
+
+# All profitable stats (S-TIER + A-TIER)
+PROFITABLE_STATS = S_TIER_STATS + A_TIER_STATS
+
+# DROPPED: STL (52.5%), BLK (53.2%) - not profitable after vig
+
+# =============================================================================
+# CONFIDENCE THRESHOLDS BY TIER
+# =============================================================================
+# S-TIER combos are more profitable at every edge level:
+#   15%+ = HIGH (60%), 10-15% = MEDIUM (58%), 5-10% = LOW (54%)
+# A-TIER individual props:
+#   15%+ = MEDIUM (56%), 10-15% = LOW (55%)
 EDGE_THRESHOLDS = {
-    "HIGH": {"edge_pct": 15, "min_games": 20},    # 56.4% hit rate
-    "MEDIUM": {"edge_pct": 10, "min_games": 15},  # ~53% hit rate
-    "LOW": {"edge_pct": 5, "min_games": 10}       # ~53% hit rate
+    "S_TIER": {
+        "HIGH": {"edge_pct": 15, "min_games": 15},     # 60%+ hit rate
+        "MEDIUM": {"edge_pct": 10, "min_games": 10},   # ~58% hit rate
+        "LOW": {"edge_pct": 5, "min_games": 10},       # ~54% hit rate
+    },
+    "A_TIER": {
+        "MEDIUM": {"edge_pct": 15, "min_games": 20},   # ~56% hit rate
+        "LOW": {"edge_pct": 10, "min_games": 15},      # ~55% hit rate
+    }
 }
+
+
+def get_stat_tier(stat):
+    """Get the tier for a stat (S_TIER or A_TIER)."""
+    if stat in S_TIER_STATS:
+        return "S_TIER"
+    elif stat in A_TIER_STATS:
+        return "A_TIER"
+    return None
 
 
 def calculate_confidence(edge_pct, vs_opp_games, dvp_rank, season_games, stat=None):
     """
-    Calculate confidence level based on backtest-validated thresholds.
+    Calculate confidence level based on tiered backtest-validated thresholds.
 
-    Backtest results (Task 4.2):
-    - 15%+ edges: 56.4% hit rate (HIGH)
-    - 10-15% edges: 52.8% hit rate (MEDIUM)
-    - 5-10% edges: 53.3% hit rate (LOW)
-    - PTS/AST are most profitable stats
+    S-TIER (combo props): 15%+ = HIGH, 10-15% = MEDIUM
+    A-TIER (individual):  15%+ = MEDIUM, 10-15% = LOW
 
     Returns:
-        tuple: (confidence_level, confidence_score)
+        tuple: (confidence_level, confidence_score, is_top_play)
     """
     edge_pct = abs(edge_pct)
+    tier = get_stat_tier(stat)
+    is_top_play = False
 
     # Calculate a numeric confidence score (0-100)
     score = 0
 
-    # Edge size is the primary driver (backtest validated)
-    # 15%+ edges showed 56.4% hit rate
+    # Edge size is the primary driver
     if edge_pct >= 20:
         score += 50
     elif edge_pct >= 15:
@@ -85,13 +117,16 @@ def calculate_confidence(edge_pct, vs_opp_games, dvp_rank, season_games, stat=No
     elif edge_pct >= 5:
         score += 15
 
-    # Stat type bonus (PTS/AST are proven)
-    if stat in PROFITABLE_STATS:
-        score += 15
+    # Tier bonus - S-TIER gets significant boost
+    if tier == "S_TIER":
+        score += 25  # Combo props are proven best
+        is_top_play = edge_pct >= 15
+    elif tier == "A_TIER":
+        score += 10
     else:
-        score -= 10  # Penalty for unproven stats
+        score -= 20  # Penalty for non-profitable stats
 
-    # Sample size contribution (up to 20 points)
+    # Sample size contribution (up to 15 points)
     if season_games >= 40:
         score += 15
     elif season_games >= 25:
@@ -99,24 +134,31 @@ def calculate_confidence(edge_pct, vs_opp_games, dvp_rank, season_games, stat=No
     elif season_games >= 15:
         score += 5
 
-    # vs opponent history (up to 15 points)
+    # vs opponent history (up to 10 points)
     if vs_opp_games >= 4:
-        score += 15
-    elif vs_opp_games >= 2:
         score += 10
+    elif vs_opp_games >= 2:
+        score += 5
 
-    # Determine confidence level based on backtest thresholds
-    # HIGH = 15%+ edge on PTS/AST (56.4% hit rate)
-    if edge_pct >= 15 and stat in PROFITABLE_STATS and season_games >= 20:
-        level = "HIGH"
-    elif edge_pct >= 10 and season_games >= 15:
-        level = "MEDIUM"
-    elif edge_pct >= 5:
-        level = "LOW"
-    else:
-        level = "NONE"
+    # Determine confidence level based on TIER
+    level = "NONE"
 
-    return level, score
+    if tier == "S_TIER":
+        # S-TIER: 15%+ = HIGH, 10-15% = MEDIUM, 5-10% = LOW
+        if edge_pct >= 15 and season_games >= 15:
+            level = "HIGH"
+        elif edge_pct >= 10 and season_games >= 10:
+            level = "MEDIUM"
+        elif edge_pct >= 5 and season_games >= 10:
+            level = "LOW"
+    elif tier == "A_TIER":
+        # A-TIER: 15%+ = MEDIUM, 10-15% = LOW
+        if edge_pct >= 15 and season_games >= 20:
+            level = "MEDIUM"
+        elif edge_pct >= 10 and season_games >= 15:
+            level = "LOW"
+
+    return level, score, is_top_play
 
 
 def get_dvp_rank(opponent, position, stat, conn):
@@ -168,10 +210,13 @@ def find_edge(player_name, opponent, stat, line, conn):
     dvp_rank = get_dvp_rank(opponent, position, stat, conn)
     season_games = get_player_season_games(player_name, conn)
 
-    # Calculate confidence (pass stat for PTS/AST bonus)
-    confidence, confidence_score = calculate_confidence(
+    # Calculate confidence (pass stat for tier-based scoring)
+    confidence, confidence_score, is_top_play = calculate_confidence(
         edge_pct, vs_opp_games, dvp_rank, season_games, stat
     )
+
+    # Get stat tier for labeling
+    stat_tier = get_stat_tier(stat)
 
     # Build factors JSON (convert numpy types to native Python)
     factors = {
@@ -200,6 +245,8 @@ def find_edge(player_name, opponent, stat, line, conn):
         "pick": pick,
         "confidence": confidence,
         "confidence_score": confidence_score,
+        "stat_tier": stat_tier,
+        "is_top_play": is_top_play,
         "factors": json.dumps(factors)
     }
 
@@ -252,10 +299,12 @@ def display_edge(edge):
 
     factors = json.loads(edge["factors"])
 
-    # Show if this is a backtest-validated stat
-    validated = " [VALIDATED]" if edge["prop_type"] in PROFITABLE_STATS else ""
+    # Show tier and top play status
+    tier = edge.get("stat_tier", "")
+    tier_label = f" [{tier}]" if tier else ""
+    top_play = " >>> TOP PLAY <<<" if edge.get("is_top_play") else ""
 
-    print(f"\n{conf_marker} {edge['confidence']} CONFIDENCE{validated}")
+    print(f"\n{conf_marker} {edge['confidence']} CONFIDENCE{tier_label}{top_play}")
     print(f"   {edge['player_name']} {edge['pick']} {edge['line']} {edge['prop_type']}")
     print(f"   vs {edge['opponent']}")
     print(f"   Projection: {edge['projection']} | Edge: {edge['edge']:+.1f} ({edge['edge_pct']:+.1f}%)")

@@ -38,10 +38,17 @@ def get_props_picks(conn, target_date=None):
         target_date = date.today().isoformat()
 
     picks = pd.read_sql("""
-        SELECT player_name, opponent, prop_type, line, projection, edge_pct, pick, confidence
+        SELECT player_name, opponent, prop_type, line, projection, edge_pct, pick,
+               confidence, stat_tier, is_top_play
         FROM props_edges
         WHERE date = ?
         ORDER BY
+            is_top_play DESC,
+            CASE stat_tier
+                WHEN 'S_TIER' THEN 1
+                WHEN 'A_TIER' THEN 2
+                ELSE 3
+            END,
             CASE confidence
                 WHEN 'HIGH' THEN 1
                 WHEN 'MEDIUM' THEN 2
@@ -109,31 +116,73 @@ def generate_console_card(picks, results, overall, nugget, target_date):
     lines.append("=" * 50)
     lines.append("")
 
-    # Props Section
-    lines.append("[PLAYER PROPS] Backtest: 56.4% on 15%+ edges")
-    lines.append("-" * 50)
+    # Check for stat_tier column (new schema)
+    has_tiers = "stat_tier" in picks.columns if not picks.empty else False
 
-    high_picks = picks[picks["confidence"] == "HIGH"]
-    med_picks = picks[picks["confidence"] == "MEDIUM"]
+    if has_tiers:
+        # TOP PLAYS Section (S-TIER combo props with 15%+ edge)
+        top_plays = picks[picks["is_top_play"] == 1] if "is_top_play" in picks.columns else picks[picks["stat_tier"] == "S_TIER"]
 
-    if len(high_picks) > 0:
-        for _, p in high_picks.head(3).iterrows():
-            stars = "***"
-            lines.append(f"  [{stars}] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
-            lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
-        lines.append("")
+        if len(top_plays) > 0:
+            lines.append("[TOP PLAYS] S-Tier Combos - 60% hit rate on 15%+ edges")
+            lines.append("-" * 50)
+            for _, p in top_plays.head(3).iterrows():
+                lines.append(f"  [***] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
+                lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
+            lines.append("")
 
-    if len(med_picks) > 0:
-        for _, p in med_picks.head(3).iterrows():
-            stars = "**"
-            lines.append(f"  [{stars}] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
-            lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
-        lines.append("")
+        # Other S-TIER picks (not top plays)
+        s_tier = picks[(picks["stat_tier"] == "S_TIER") & (picks.get("is_top_play", 0) != 1)]
+        if len(s_tier) > 0:
+            lines.append("[COMBO PROPS] S-Tier - 58% avg hit rate")
+            lines.append("-" * 50)
+            for _, p in s_tier.head(3).iterrows():
+                conf_marker = {"HIGH": "***", "MEDIUM": "**", "LOW": "*"}.get(p["confidence"], "*")
+                lines.append(f"  [{conf_marker}] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
+                lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
+            lines.append("")
 
-    if len(high_picks) == 0 and len(med_picks) == 0:
-        lines.append("  No HIGH/MEDIUM confidence picks today")
-        lines.append("  (Require 15%+ edge on PTS/AST)")
-        lines.append("")
+        # A-TIER picks (individual props)
+        a_tier = picks[picks["stat_tier"] == "A_TIER"]
+        if len(a_tier) > 0:
+            lines.append("[INDIVIDUAL PROPS] A-Tier - 55% avg hit rate")
+            lines.append("-" * 50)
+            for _, p in a_tier.head(4).iterrows():
+                conf_marker = {"HIGH": "***", "MEDIUM": "**", "LOW": "*"}.get(p["confidence"], "*")
+                lines.append(f"  [{conf_marker}] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
+                lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
+            lines.append("")
+
+        if len(top_plays) == 0 and len(s_tier) == 0 and len(a_tier) == 0:
+            lines.append("[PLAYER PROPS]")
+            lines.append("-" * 50)
+            lines.append("  No qualifying picks today")
+            lines.append("  (Require 10%+ edge on validated stats)")
+            lines.append("")
+    else:
+        # Fallback to old format if no tiers
+        lines.append("[PLAYER PROPS] Backtest: 56.4% on 15%+ edges")
+        lines.append("-" * 50)
+
+        high_picks = picks[picks["confidence"] == "HIGH"]
+        med_picks = picks[picks["confidence"] == "MEDIUM"]
+
+        if len(high_picks) > 0:
+            for _, p in high_picks.head(3).iterrows():
+                lines.append(f"  [***] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
+                lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
+            lines.append("")
+
+        if len(med_picks) > 0:
+            for _, p in med_picks.head(3).iterrows():
+                lines.append(f"  [**] {p['player_name']} {p['pick']} {p['line']} {p['prop_type']}")
+                lines.append(f"        vs {p['opponent']} | Proj: {p['projection']} | Edge: {p['edge_pct']:+.1f}%")
+            lines.append("")
+
+        if len(high_picks) == 0 and len(med_picks) == 0:
+            lines.append("  No HIGH/MEDIUM confidence picks today")
+            lines.append("  (Require 15%+ edge on PTS/AST)")
+            lines.append("")
 
     # Stat of the Day
     if nugget:
