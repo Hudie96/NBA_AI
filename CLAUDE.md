@@ -18,9 +18,9 @@ Two outputs: profitable picks AND engaging content that builds an audience.
 ### What's In Progress
 - Live result tracking (results.csv created, needs daily updates)
 - CLV (closing line value) measurement
+- Player props validation (backtest in progress)
 
 ### What's Planned
-- Player props engine
 - Content generation for social media
 - Bankroll/Kelly sizing calculator
 - Social media distribution automation
@@ -36,12 +36,17 @@ Two outputs: profitable picks AND engaging content that builds an audience.
 ### Scripts (scripts/)
 | File | Purpose |
 |------|---------|
-| `daily_predictions.py` | Main pipeline - generates daily picks |
+| `daily_predictions.py` | Main pipeline - generates daily spread picks |
+| `daily_props.py` | Player props projections (PTS, REB, AST, 3PM) |
 | `flag_system.py` | Calculates flag_score, categorizes GREEN/YELLOW/RED |
+| `props_flag_system.py` | Props confidence scoring and zone categorization |
+| `build_player_game_logs.py` | ETL: builds player_game_logs from PlayerBox |
+| `project_props.py` | Core projection logic for player stats |
 | `shared_utils.py` | Shared functions (get_team_recent_games, calculate_team_stats) |
 | `injury_impact.py` | Injury adjustment calculations (currently disabled) |
 | `rest_detection.py` | B2B and rest day detection |
 | `backtest.py` | Historical validation of signals |
+| `backtest_props.py` | Props model validation |
 | `log_result.py` | Log new picks to results.csv |
 | `update_result.py` | Update pick outcomes |
 
@@ -81,13 +86,18 @@ Signal + B2B fade    →  71.4%
 # 1. Update schedule (if needed)
 python -m src.database_updater.schedule --season=2024-2025
 
-# 2. Generate predictions
+# 2. Generate spread predictions
 python scripts/daily_predictions.py
 
-# 3. Review ai_review_DATE.txt for GREEN/YELLOW picks
-# 4. Picks auto-logged to data/results.csv
+# 3. Generate props projections
+python scripts/build_player_game_logs.py  # First time only, or --rebuild
+python scripts/daily_props.py --min-edge 10
 
-# 5. After games, update results
+# 4. Review ai_review_DATE.txt for GREEN/YELLOW spread picks
+# 5. Review props_ai_review_DATE.txt for props picks
+# 6. Picks auto-logged to data/results.csv and data/props_results.csv
+
+# 7. After games, update results
 python scripts/update_result.py "2026-01-26" "BOS @ CHI" "W" 5 0.5
 ```
 
@@ -98,6 +108,8 @@ python scripts/update_result.py "2026-01-26" "BOS @ CHI" "W" 5 0.5
 | Games | 2,149 | Schedule metadata |
 | GameStates | 331,193 | Game state snapshots |
 | PlayerBox | 14,975 | Player stats |
+| player_game_logs | derived | Player stats with combos (built from PlayerBox) |
+| player_vs_team | derived | Player averages vs each opponent |
 | Betting | 677 | Vegas lines |
 | InjuryReports | 13,034 | Injury data |
 
@@ -108,9 +120,13 @@ Date range: 2024-10-04 to 2026-01-24
 | Command | Action |
 |---------|--------|
 | "Run predictions" | `python scripts/daily_predictions.py` |
+| "Run props" | `python scripts/daily_props.py` |
+| "Run props (10%+ edge)" | `python scripts/daily_props.py --min-edge 10` |
+| "Build player logs" | `python scripts/build_player_game_logs.py` |
 | "Log pick" | `python scripts/log_result.py "GAME" "PICK" spread flag_score edge` |
 | "Update result" | `python scripts/update_result.py "DATE" "GAME" "W/L" margin clv` |
 | "Backtest" | `python scripts/backtest.py` |
+| "Backtest props" | `python scripts/backtest_props.py` |
 | "Update schedule" | `python -m src.database_updater.schedule --season=2024-2025` |
 
 ## Project Goals
