@@ -3,6 +3,7 @@
 # Development/planning docs (local only)
 TODO.md
 DATA_MODEL.md
+AXIOM-TOKEN-TRACKING.md
 
 # GitHub Copilot workspace instructions (local only)
 .github/
@@ -63,4 +64,13 @@ htmlcov/
 .idea/
 
 # Claude Code
-.claude/TODO.md
+.claude/
+
+# Generated outputs (local analysis results)
+outputs/
+
+# SQLite databases
+*.db
+
+# Windows artifacts
+nul

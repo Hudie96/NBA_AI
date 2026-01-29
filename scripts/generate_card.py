@@ -32,6 +32,63 @@ from src.config import config
 DB_PATH = config["database"]["path"]
 
 
+def get_spread_total_edges(target_date=None, include_final=False):
+    """Get spread and total edge picks for a date.
+
+    Args:
+        target_date: Date in YYYY-MM-DD format
+        include_final: If True, include completed games (for backtesting)
+    """
+    try:
+        from scripts.spread_total_edges import SpreadTotalEdges
+        analyzer = SpreadTotalEdges()
+
+        # Check if date is in the past - if so, include final games
+        if target_date:
+            from datetime import datetime
+            target = datetime.strptime(target_date, '%Y-%m-%d').date()
+            today = datetime.now().date()
+            if target < today:
+                include_final = True
+
+        # Get games with appropriate filter
+        games = analyzer.get_todays_games(target_date, include_final=include_final)
+        picks = []
+        for game in games:
+            analysis = analyzer.analyze_game(game)
+
+            if analysis['spread_edge']:
+                picks.append({
+                    'type': 'SPREAD',
+                    'game': f"{analysis['away_team']} @ {analysis['home_team']}",
+                    'pick': f"{analysis['underdog']} +{abs(analysis['spread']):.1f}",
+                    'edge': analysis['spread_edge']['edge_type'],
+                    'confidence': analysis['spread_edge']['confidence'],
+                    'hit_rate': analysis['spread_edge']['historical']['hit_rate'],
+                    'multi_edge': analysis['multi_edge']
+                })
+
+            if analysis['total_edge']:
+                picks.append({
+                    'type': 'TOTAL',
+                    'game': f"{analysis['away_team']} @ {analysis['home_team']}",
+                    'pick': f"UNDER {analysis['total_line']:.1f}" if analysis['total_line'] else "UNDER",
+                    'edge': analysis['total_edge']['edge_type'],
+                    'confidence': analysis['total_edge']['confidence'],
+                    'hit_rate': analysis['total_edge']['historical']['hit_rate'],
+                    'multi_edge': analysis['multi_edge'],
+                    'warning': analysis['total_edge'].get('warning')
+                })
+
+        analyzer.close()
+        return picks
+    except Exception as e:
+        print(f"Warning: Could not get spread/total edges: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
 def get_props_picks(conn, target_date=None, verified_only=False):
     """Get prop picks for today."""
     if target_date is None:
@@ -140,7 +197,7 @@ def get_top_nugget(conn):
     return None
 
 
-def generate_console_card(picks, results, overall, nugget, target_date):
+def generate_console_card(picks, results, overall, nugget, target_date, spread_picks=None):
     """Generate a console-formatted card."""
     date_str = datetime.strptime(target_date, "%Y-%m-%d").strftime("%b %d, %Y")
 
@@ -150,6 +207,60 @@ def generate_console_card(picks, results, overall, nugget, target_date):
     lines.append(f"     AXIOM DAILY CARD - {date_str}")
     lines.append("=" * 50)
     lines.append("")
+
+    # === SPREAD & TOTAL EDGES (BEFORE PROPS) ===
+    if spread_picks is None:
+        spread_picks = get_spread_total_edges(target_date)
+
+    if spread_picks:
+        # Separate by type
+        multi_edge = [p for p in spread_picks if p.get('multi_edge')]
+        spread_only = [p for p in spread_picks if p['type'] == 'SPREAD' and not p.get('multi_edge')]
+        total_only = [p for p in spread_picks if p['type'] == 'TOTAL' and not p.get('multi_edge')]
+
+        lines.append("=== SPREAD & TOTAL EDGES ===")
+        lines.append("(Backtested: 60-77% hit rates)")
+        lines.append("")
+
+        # Multi-edge (highest conviction)
+        if multi_edge:
+            lines.append("[***] MULTI-EDGE (Highest Conviction)")
+            lines.append("-" * 50)
+            # Group by game
+            games_seen = set()
+            for p in multi_edge:
+                if p['game'] not in games_seen:
+                    games_seen.add(p['game'])
+                    # Find both picks for this game
+                    game_picks = [x for x in multi_edge if x['game'] == p['game']]
+                    lines.append(f"  {p['game']}")
+                    for gp in game_picks:
+                        conf_emoji = "***" if gp['confidence'] == 'HIGH' else "**"
+                        lines.append(f"    [{conf_emoji}] {gp['pick']} ({gp['hit_rate']}% hit rate)")
+            lines.append("")
+
+        # Underdog plays
+        if spread_only:
+            lines.append("[DOG] UNDERDOG PLAYS")
+            lines.append("-" * 50)
+            for p in sorted(spread_only, key=lambda x: -x['hit_rate']):
+                conf_emoji = "***" if p['confidence'] == 'HIGH' else "**"
+                lines.append(f"  [{conf_emoji}] {p['game']}")
+                lines.append(f"      -> {p['pick']} | {p['edge']} ({p['hit_rate']}%)")
+            lines.append("")
+
+        # Under plays
+        if total_only:
+            lines.append("[DOWN] UNDER PLAYS")
+            lines.append("-" * 50)
+            for p in sorted(total_only, key=lambda x: -x['hit_rate']):
+                conf_emoji = "***" if p['confidence'] == 'HIGH' else "**"
+                warning = f" [!] {p['warning']}" if p.get('warning') else ""
+                lines.append(f"  [{conf_emoji}] {p['game']}")
+                lines.append(f"      -> {p['pick']} | {p['edge']} ({p['hit_rate']}%){warning}")
+            lines.append("")
+
+        lines.append("")
 
     # Check for stat_tier column (new schema)
     has_tiers = "stat_tier" in picks.columns if not picks.empty else False
@@ -358,9 +469,12 @@ def main():
     results, overall = get_props_results(conn)
     nugget = get_top_nugget(conn)
 
+    # Get spread/total edges
+    spread_picks = get_spread_total_edges(target_date)
+
     # Generate card
     if args.format == "console":
-        card = generate_console_card(picks, results, overall, nugget, target_date)
+        card = generate_console_card(picks, results, overall, nugget, target_date, spread_picks)
         print(card)
 
     elif args.format == "twitter":

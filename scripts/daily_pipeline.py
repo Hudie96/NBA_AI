@@ -8,10 +8,11 @@ Steps:
 1. Update player game logs (yesterday's games)
 2. Refresh DVP rankings
 3. Rebuild player vs team history
-4. Run team spread picks (existing system)
-5. Run props edge finder (PTS/AST, 15%+ edges)
-6. Generate stat nuggets (optional)
-7. Output daily card
+4. Run SPREAD & TOTAL EDGES (validated backtested edges)
+5. Run team spread picks (existing system)
+6. Run props edge finder (PTS/AST, 15%+ edges)
+7. Generate stat nuggets (optional)
+8. Output daily card
 
 Usage:
     python scripts/daily_pipeline.py
@@ -95,9 +96,92 @@ def update_player_data(season="2024-25"):
     return True
 
 
+def run_spread_total_edges(target_date=None):
+    """Step 4: Run validated spread & total edges."""
+    print_step(4, "Running Spread & Total Edges (Backtested)")
+
+    try:
+        from scripts.spread_total_edges import SpreadTotalEdges
+        from datetime import datetime
+
+        analyzer = SpreadTotalEdges()
+
+        # Check if date is in the past - if so, include final games
+        include_final = False
+        if target_date:
+            target = datetime.strptime(target_date, '%Y-%m-%d').date()
+            today = datetime.now().date()
+            if target < today:
+                include_final = True
+
+        # Get games with appropriate filter
+        games = analyzer.get_todays_games(target_date, include_final=include_final)
+
+        if not games:
+            print(f"  No games found for {target_date or 'today'}")
+            analyzer.close()
+            return True, []
+
+        # Analyze each game
+        picks = []
+        for game in games:
+            analysis = analyzer.analyze_game(game)
+
+            if analysis['spread_edge']:
+                picks.append({
+                    'type': 'SPREAD',
+                    'game': f"{analysis['away_team']} @ {analysis['home_team']}",
+                    'pick': f"{analysis['underdog']} +{abs(analysis['spread']):.1f}",
+                    'edge': analysis['spread_edge']['edge_type'],
+                    'confidence': analysis['spread_edge']['confidence'],
+                    'hit_rate': analysis['spread_edge']['historical']['hit_rate'],
+                    'multi_edge': analysis['multi_edge']
+                })
+
+            if analysis['total_edge']:
+                picks.append({
+                    'type': 'TOTAL',
+                    'game': f"{analysis['away_team']} @ {analysis['home_team']}",
+                    'pick': f"UNDER {analysis['total_line']:.1f}" if analysis['total_line'] else "UNDER",
+                    'edge': analysis['total_edge']['edge_type'],
+                    'confidence': analysis['total_edge']['confidence'],
+                    'hit_rate': analysis['total_edge']['historical']['hit_rate'],
+                    'multi_edge': analysis['multi_edge'],
+                    'warning': analysis['total_edge'].get('warning')
+                })
+
+        # Print summary
+        multi_edge = [p for p in picks if p.get('multi_edge')]
+        spread_plays = [p for p in picks if p['type'] == 'SPREAD']
+        total_plays = [p for p in picks if p['type'] == 'TOTAL']
+
+        print(f"\n  Found {len(games)} games")
+        print(f"  Multi-edge plays: {len(set(p['game'] for p in multi_edge))}")
+        print(f"  Underdog plays: {len(spread_plays)}")
+        print(f"  Under plays: {len(total_plays)}")
+
+        # Show top picks
+        if multi_edge:
+            print(f"\n  TOP MULTI-EDGE:")
+            games_shown = set()
+            for p in multi_edge[:4]:
+                if p['game'] not in games_shown:
+                    games_shown.add(p['game'])
+                    print(f"    {p['game']}")
+
+        analyzer.close()
+        return True, picks
+
+    except Exception as e:
+        print(f"  Error running spread/total edges: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, []
+
+
 def run_team_spreads(target_date=None):
-    """Step 4: Run team spread predictions."""
-    print_step(4, "Running Team Spread Predictions")
+    """Step 5: Run team spread predictions (legacy system)."""
+    print_step(5, "Running Team Spread Predictions (Legacy)")
 
     args = []
     if target_date:
@@ -116,8 +200,8 @@ def run_team_spreads(target_date=None):
 
 
 def run_props_finder(target_date=None):
-    """Step 5: Run props edge finder."""
-    print_step(5, "Finding Props Edges (PTS/AST, 15%+ validated)")
+    """Step 6: Run props edge finder."""
+    print_step(6, "Finding Props Edges (PTS/AST, 15%+ validated)")
 
     # Import the edge finder functions directly
     try:
@@ -146,8 +230,8 @@ def run_props_finder(target_date=None):
 
 
 def generate_stat_nuggets(conn):
-    """Step 6: Generate stat nuggets (optional)."""
-    print_step(6, "Generating Stat Nuggets")
+    """Step 7: Generate stat nuggets (optional)."""
+    print_step(7, "Generating Stat Nuggets")
 
     try:
         from scripts.generate_nuggets import generate_all_nuggets, display_nuggets
@@ -167,9 +251,9 @@ def generate_stat_nuggets(conn):
         return []
 
 
-def generate_daily_card(target_date=None, card_format="console"):
-    """Step 7: Generate the daily pick card using generate_card module."""
-    print_step(7, "Generating Daily Card")
+def generate_daily_card(target_date=None, card_format="console", spread_picks=None):
+    """Step 8: Generate the daily pick card using generate_card module."""
+    print_step(8, "Generating Daily Card")
 
     try:
         from scripts.generate_card import (
@@ -245,32 +329,37 @@ def main():
     print_header(f"AXIOM DAILY PIPELINE - {target_date}")
 
     prop_edges = []
+    spread_picks = []
 
     # Step 1-3: Update data (unless skipped)
     if not args.skip_update and not args.spreads_only:
         print("Updating player data (this may take a few minutes)...")
         update_player_data(args.season)
 
-    # Step 4: Team spreads (unless props-only)
+    # Step 4: Spread & Total edges (unless props-only)
     if not args.props_only:
+        success, spread_picks = run_spread_total_edges(target_date)
+
+    # Step 5: Team spreads - legacy (unless props-only)
+    if not args.props_only and not args.skip_update:
         run_team_spreads(target_date)
 
-    # Step 5: Props edges (unless spreads-only)
+    # Step 6: Props edges (unless spreads-only)
     if not args.spreads_only:
         success, prop_edges = run_props_finder(target_date)
 
-    # Step 6: Stat nuggets (optional)
+    # Step 7: Stat nuggets (optional)
     if args.with_nuggets and not args.spreads_only:
         conn = sqlite3.connect(DB_PATH)
         generate_stat_nuggets(conn)
         conn.close()
 
-    # Step 6b: AI verification (optional)
+    # Step 7b: AI verification (optional)
     if args.with_verification and not args.spreads_only:
         run_ai_verification(target_date)
 
-    # Step 7: Generate daily card
-    generate_daily_card(target_date=target_date, card_format=args.format)
+    # Step 8: Generate daily card
+    generate_daily_card(target_date=target_date, card_format=args.format, spread_picks=spread_picks)
 
     print_header("PIPELINE COMPLETE")
 
