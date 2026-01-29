@@ -358,6 +358,28 @@ def main():
     if args.with_verification and not args.spreads_only:
         run_ai_verification(target_date)
 
+    # Step 7c: Build parlay
+    if not args.props_only and not args.spreads_only:
+        print_step("7c", "Building Daily Parlay")
+        try:
+            from scripts.build_parlay import get_todays_games, get_todays_props, find_parlay_legs, build_optimal_parlay, calculate_parlay_odds
+            games = get_todays_games(target_date)
+            props = get_todays_props(target_date)
+            legs = find_parlay_legs(games, props)
+            parlay = build_optimal_parlay(legs, 5)
+            if parlay:
+                prob, payout, roi = calculate_parlay_odds(parlay)
+                print(f"\n  {len(parlay)}-leg parlay found")
+                print(f"  Combined: {prob*100:.1f}% | Payout: {payout:.1f}x | ROI: {roi:+.0f}%")
+                for i, leg in enumerate(parlay[:3], 1):
+                    print(f"    Leg {i}: {leg['pick'][:40]} ({leg['hit_rate']*100:.0f}%)")
+                if len(parlay) > 3:
+                    print(f"    ... +{len(parlay)-3} more legs")
+            else:
+                print("  No qualifying parlay today")
+        except Exception as e:
+            print(f"  Parlay builder error: {e}")
+
     # Step 8: Generate daily card
     generate_daily_card(target_date=target_date, card_format=args.format, spread_picks=spread_picks)
 
