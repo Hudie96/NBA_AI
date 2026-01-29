@@ -358,23 +358,24 @@ def main():
     if args.with_verification and not args.spreads_only:
         run_ai_verification(target_date)
 
-    # Step 7c: Build parlay
+    # Step 7c: Build parlay (v2 - research-based edges)
     if not args.props_only and not args.spreads_only:
-        print_step("7c", "Building Daily Parlay")
+        print_step("7c", "Building Daily Parlay (v2)")
         try:
-            from scripts.build_parlay import get_todays_games, get_todays_props, find_parlay_legs, build_optimal_parlay, calculate_parlay_odds
+            from scripts.build_parlay_v2 import get_todays_games, find_all_edges, select_parlay_legs, calculate_parlay, assess_parlay_quality
             games = get_todays_games(target_date)
-            props = get_todays_props(target_date)
-            legs = find_parlay_legs(games, props)
-            parlay = build_optimal_parlay(legs, 5)
+            edges = find_all_edges(games)
+            parlay = select_parlay_legs(edges, 5)
             if parlay:
-                prob, payout, roi = calculate_parlay_odds(parlay)
-                print(f"\n  {len(parlay)}-leg parlay found")
+                prob, payout, roi = calculate_parlay(parlay)
+                quality, bet_size = assess_parlay_quality(prob, roi)
+                print(f"\n  {len(parlay)}-leg parlay found [{quality}]")
                 print(f"  Combined: {prob*100:.1f}% | Payout: {payout:.1f}x | ROI: {roi:+.0f}%")
                 for i, leg in enumerate(parlay[:3], 1):
                     print(f"    Leg {i}: {leg['pick'][:40]} ({leg['hit_rate']*100:.0f}%)")
                 if len(parlay) > 3:
                     print(f"    ... +{len(parlay)-3} more legs")
+                print(f"  Recommended: {bet_size}")
             else:
                 print("  No qualifying parlay today")
         except Exception as e:
