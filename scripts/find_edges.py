@@ -314,6 +314,96 @@ def save_edges_to_db(edges, conn):
     return len(edges)
 
 
+RESULTS_CSV = PROJECT_ROOT / 'data' / 'results.csv'
+
+
+def log_s_tier_props(edges, target_date, max_picks=5):
+    """
+    Log top S_TIER HIGH confidence props to results.csv.
+
+    Only logs the best picks (limited to max_picks).
+    """
+    import csv
+
+    # Filter to S_TIER + HIGH confidence only
+    s_tier_high = [e for e in edges if e.get('stat_tier') == 'S_TIER' and e.get('confidence') == 'HIGH']
+
+    if not s_tier_high:
+        return 0
+
+    # Sort by edge% and take top picks
+    s_tier_high.sort(key=lambda x: abs(x.get('edge_pct', 0)), reverse=True)
+
+    # Get best prop per player (highest edge%), limited to max_picks unique players
+    best_by_player = {}
+    for e in s_tier_high:
+        player = e['player_name']
+        if player not in best_by_player:
+            best_by_player[player] = e
+        if len(best_by_player) >= max_picks:
+            break
+
+    # Check existing picks for this date to avoid duplicates
+    existing = set()
+    if RESULTS_CSV.exists():
+        with open(RESULTS_CSV, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['date'] == target_date and row['bet_type'] == 'PROP':
+                    existing.add(row['pick'])
+
+    # Log new picks
+    logged = 0
+    rows_to_add = []
+
+    for player, e in best_by_player.items():
+        pick_str = f"{e['player_name']} {e['pick']} {e['line']} {e['prop_type']}"
+
+        if pick_str in existing:
+            continue
+
+        # Get game string
+        game_str = f"vs {e['opponent']}"
+
+        row = {
+            'date': target_date,
+            'game': game_str,
+            'bet_type': 'PROP',
+            'pick': pick_str,
+            'line': e['line'],
+            'vegas_line': '',
+            'tier': 'S_TIER',
+            'edge': f"{e['edge_pct']:+.1f}%",
+            'result': '',
+            'actual': ''
+        }
+        rows_to_add.append(row)
+        logged += 1
+
+    # Append to CSV
+    if rows_to_add:
+        fieldnames = ['date', 'game', 'bet_type', 'pick', 'line', 'vegas_line', 'tier', 'edge', 'result', 'actual']
+
+        file_exists = RESULTS_CSV.exists()
+        with open(RESULTS_CSV, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerows(rows_to_add)
+
+        print(f"[AUTO-LOG] Logged {logged} S_TIER props to {RESULTS_CSV}")
+
+    return logged
+
+
+def safe_print(text):
+    """Print with encoding safety for Windows console."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode('ascii', 'replace').decode('ascii'))
+
+
 def display_edge(edge):
     """Pretty print an edge."""
     conf_marker = {"HIGH": "[***]", "MEDIUM": "[**]", "LOW": "[*]"}.get(edge["confidence"], "[ ]")
@@ -325,12 +415,15 @@ def display_edge(edge):
     tier_label = f" [{tier}]" if tier else ""
     top_play = " >>> TOP PLAY <<<" if edge.get("is_top_play") else ""
 
-    print(f"\n{conf_marker} {edge['confidence']} CONFIDENCE{tier_label}{top_play}")
-    print(f"   {edge['player_name']} {edge['pick']} {edge['line']} {edge['prop_type']}")
-    print(f"   vs {edge['opponent']}")
-    print(f"   Projection: {edge['projection']} | Edge: {edge['edge']:+.1f} ({edge['edge_pct']:+.1f}%)")
-    print(f"   L10: {factors['last_10_avg']} | Szn: {factors['season_avg']} | vsOpp: {factors['vs_opp_avg']} ({factors['vs_opp_games']}g)")
-    print(f"   DVP Rank: {factors['dvp_rank']} | DVP Adj: {factors['dvp_adj']:+.1f}")
+    # Clean player name for display
+    player_name = edge['player_name'].encode('ascii', 'replace').decode('ascii')
+
+    safe_print(f"\n{conf_marker} {edge['confidence']} CONFIDENCE{tier_label}{top_play}")
+    safe_print(f"   {player_name} {edge['pick']} {edge['line']} {edge['prop_type']}")
+    safe_print(f"   vs {edge['opponent']}")
+    safe_print(f"   Projection: {edge['projection']} | Edge: {edge['edge']:+.1f} ({edge['edge_pct']:+.1f}%)")
+    safe_print(f"   L10: {factors['last_10_avg']} | Szn: {factors['season_avg']} | vsOpp: {factors['vs_opp_avg']} ({factors['vs_opp_games']}g)")
+    safe_print(f"   DVP Rank: {factors['dvp_rank']} | DVP Adj: {factors['dvp_adj']:+.1f}")
 
 
 def find_edges_for_today(conn, target_date=None, all_stats=False, min_games=20):
@@ -500,12 +593,16 @@ def main():
     build_player_positions_table(conn)
 
     if args.today:
+        target_date = args.date or date.today().isoformat()
         edges = find_edges_for_today(
             conn,
-            target_date=args.date,
+            target_date=target_date,
             all_stats=args.all_stats
         )
-        for edge in edges[:20]:  # Show top 20
+
+        # Display top S_TIER picks
+        s_tier_edges = [e for e in edges if e.get('stat_tier') == 'S_TIER' and e.get('confidence') == 'HIGH']
+        for edge in s_tier_edges[:15]:  # Show top 15 S_TIER
             display_edge(edge)
 
         print("\n" + "=" * 50)
@@ -514,7 +611,12 @@ def main():
         high = len([e for e in edges if e["confidence"] == "HIGH"])
         med = len([e for e in edges if e["confidence"] == "MEDIUM"])
         low = len([e for e in edges if e["confidence"] == "LOW"])
+        s_tier_count = len([e for e in edges if e.get("stat_tier") == "S_TIER"])
         print(f"HIGH: {high} | MEDIUM: {med} | LOW: {low}")
+        print(f"S_TIER picks: {len(s_tier_edges)}")
+
+        # Auto-log S_TIER picks to results.csv
+        log_s_tier_props(edges, target_date)
 
         if args.save:
             count = save_edges_to_db(edges, conn)
