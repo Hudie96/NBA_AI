@@ -808,19 +808,40 @@ def main():
     print_step(5, "Historical ATS Calculation")
     calculate_ats_stats(conn, "2025-26")
 
+    if not args.advanced_only:
+        # Step 6: Play Types (ISO, PnR, Transition, etc.)
+        print_step(6, "Play Type Data")
+        if run_external_script("fetch_play_types.py", ["--season", args.season]):
+            safe_print("  Play types updated")
+
+        # Step 7: Hustle Stats
+        print_step(7, "Hustle Stats (Deflections, Contested Shots)")
+        if run_external_script("fetch_hustle_stats.py", ["--season", args.season]):
+            safe_print("  Hustle stats updated")
+
+        # Step 8: Shooting Zones
+        print_step(8, "Shooting Zones (Paint, Corner 3, etc.)")
+        if run_external_script("fetch_shooting_zones.py", ["--season", args.season]):
+            safe_print("  Shooting zones updated")
+
+        # Step 9: Fatigue Patterns
+        print_step(9, "Fatigue Patterns (B2B, 3-in-4, etc.)")
+        if run_external_script("calculate_fatigue_patterns.py", ["--rebuild", "--season", "2025-2026"]):
+            safe_print("  Fatigue patterns updated")
+
     if not args.advanced_only and not args.quick:
-        # Step 6: Player Game Logs
-        print_step(6, "Player Game Logs")
+        # Step 10: Player Game Logs
+        print_step(10, "Player Game Logs")
         if run_external_script("fetch_player_logs.py", ["--season", args.season]):
             safe_print("  Player logs updated")
 
-        # Step 7: Defense vs Position
-        print_step(7, "Defense vs Position (DVP)")
+        # Step 11: Defense vs Position
+        print_step(11, "Defense vs Position (DVP)")
         if run_external_script("fetch_dvp.py", ["--season", args.season]):
             safe_print("  DVP updated")
 
-        # Step 8: Player vs Team History
-        print_step(8, "Player vs Team History")
+        # Step 12: Player vs Team History
+        print_step(12, "Player vs Team History")
         if run_external_script("build_player_vs_team.py", ["--season", args.season]):
             safe_print("  Player vs Team updated")
 
@@ -843,7 +864,15 @@ def main():
     # Summary
     conn = sqlite3.connect(DB_PATH)
     safe_print("\nData Summary:")
-    for table in ["TeamAdvancedStats", "PlayerAdvancedStats", "TeamClutchStats", "PlayerClutchStats", "TeamATSStats", "GameATSResults"]:
+    tables = [
+        "TeamAdvancedStats", "PlayerAdvancedStats",
+        "TeamClutchStats", "PlayerClutchStats",
+        "TeamATSStats", "GameATSResults",
+        "TeamPlayTypes", "PlayerPlayTypes",
+        "TeamHustleStats", "PlayerHustleStats",
+        "TeamShootingZones", "TeamFatiguePatterns"
+    ]
+    for table in tables:
         try:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             safe_print(f"  {table}: {count:,} records")
