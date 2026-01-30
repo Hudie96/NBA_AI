@@ -66,6 +66,9 @@ htmlcov/
 # Claude Code
 .claude/
 
+# Archive (old/unused scripts)
+.archive/
+
 # Generated outputs (local analysis results)
 outputs/
 
