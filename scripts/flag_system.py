@@ -1,18 +1,22 @@
 """
 Flag System for AI Review
 
-NEW SYSTEM based on backtest validation (123 games, 2025-12-25 to 2026-01-24):
-- Games with injury_adj = 0 show 62.5% coverage (20/32 games)
-- Signal + Small Spread (<3) = 72.7% coverage (8/11 games)
-- Signal + B2B Fade = 71.4% coverage (5/7 games)
-- Games with injury_adj > 0 = 36.3% coverage (33/91 games) - SKIP
+BACKTEST-VALIDATED SYSTEM (518 games, Oct 2025 - Jan 2026):
 
-Since injury adjustments are DISABLED in the model, all games have injury_adj = 0.
-The flag system differentiates based on spread size and B2B situations.
+The model excels at finding undervalued HOME teams, but fails at away teams.
+Only bet when model likes HOME more than Vegas by 5+ points.
+
+TIERS:
+- PLATINUM (84.4%): GREEN zone + Model +7 vs Vegas on HOME (38-7, +61% ROI)
+- GOLD (78.9%): GREEN zone + Model +5 vs Vegas on HOME (56-15, +51% ROI)
+- SILVER (74.4%): Model +5 vs Vegas on HOME, any zone (99-34, +42% ROI)
+- SKIP: Model favors away, or edge < 5 (losing strategy)
+
+GREEN zone = Small spread (<3) OR B2B situation
 """
 import csv
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Results CSV path
 RESULTS_CSV = Path(__file__).parent.parent / 'data' / 'results.csv'
@@ -32,17 +36,101 @@ def _get_logged_games(target_date: str) -> set:
     return logged
 
 
-def log_flagged_pick(prediction: Dict, target_date: str, flag_score: int) -> bool:
+def calculate_home_edge_vs_vegas(prediction: Dict) -> Optional[float]:
     """
-    Log a GREEN/YELLOW flagged pick to results.csv.
-
-    Args:
-        prediction: Prediction dict
-        target_date: Date string (YYYY-MM-DD)
-        flag_score: Calculated flag score
+    Calculate how much more the model likes HOME than Vegas does.
 
     Returns:
-        True if logged, False if duplicate or error
+        Positive = model more bullish on home than Vegas
+        Negative = model more bullish on away than Vegas
+        None = no Vegas line available
+    """
+    vegas_spread = prediction.get('vegas_spread')
+    if vegas_spread is None:
+        return None
+
+    # Model's view: who does it favor and by how much?
+    model_spread = prediction['spread']
+    model_favorite = prediction['favorite']
+    home_team = prediction['home_team']
+
+    # Convert to home margin (positive = home favored)
+    if model_favorite == home_team:
+        model_home_margin = model_spread
+    else:
+        model_home_margin = -model_spread
+
+    # Vegas spread is from home perspective (negative = home favored by that amount)
+    # e.g., vegas_spread = -5 means home is 5pt favorite
+    vegas_home_margin = -vegas_spread
+
+    # Edge = how much more we like home than Vegas
+    edge = model_home_margin - vegas_home_margin
+
+    return edge
+
+
+def is_green_zone(prediction: Dict) -> bool:
+    """Check if game qualifies for GREEN zone (small spread or B2B)."""
+    spread = prediction['spread']
+    home_b2b = prediction.get('home_is_b2b', False)
+    away_b2b = prediction.get('away_is_b2b', False)
+
+    return spread < 3 or home_b2b or away_b2b
+
+
+def categorize_game(prediction: Dict) -> Tuple[str, Optional[float]]:
+    """
+    Categorize a game into PLATINUM/GOLD/SILVER/SKIP.
+
+    Based on backtest (518 games, Oct 2025 - Jan 2026):
+    - PLATINUM: GREEN + Model +7 vs Vegas on HOME = 84.4% (38-7)
+    - GOLD: GREEN + Model +5 vs Vegas on HOME = 78.9% (56-15)
+    - SILVER: Model +5 vs Vegas on HOME = 74.4% (99-34)
+    - SKIP: Everything else (model likes away, or edge < 5)
+
+    Returns:
+        Tuple of (zone, edge_vs_vegas)
+    """
+    edge = calculate_home_edge_vs_vegas(prediction)
+
+    # No Vegas line = can't calculate edge = skip
+    if edge is None:
+        return "SKIP", None
+
+    # Model must favor HOME (edge > 0) with significant margin
+    green = is_green_zone(prediction)
+
+    # Check if model actually favors home team
+    model_favors_home = prediction['favorite'] == prediction['home_team']
+
+    if not model_favors_home:
+        # Model favors away = SKIP (43.4% win rate historically)
+        return "SKIP", edge
+
+    if edge >= 7 and green:
+        return "PLATINUM", edge
+    elif edge >= 5 and green:
+        return "GOLD", edge
+    elif edge >= 5:
+        return "SILVER", edge
+    else:
+        return "SKIP", edge
+
+
+def get_zone_stats() -> Dict[str, str]:
+    """Return historical win rates for each zone."""
+    return {
+        'PLATINUM': '84.4% (38-7 in backtest, +61% ROI)',
+        'GOLD': '78.9% (56-15 in backtest, +51% ROI)',
+        'SILVER': '74.4% (99-34 in backtest, +42% ROI)',
+        'SKIP': 'No edge or negative edge - do not bet'
+    }
+
+
+def log_flagged_pick(prediction: Dict, target_date: str, zone: str, edge: float) -> bool:
+    """
+    Log a PLATINUM/GOLD/SILVER pick to results.csv.
     """
     game_str = f"{prediction['away_team']} @ {prediction['home_team']}"
 
@@ -54,16 +142,14 @@ def log_flagged_pick(prediction: Dict, target_date: str, flag_score: int) -> boo
     # Build pick string
     pick_str = f"{prediction['favorite']} -{prediction['spread']:.1f}"
 
-    # Get model edge (default to 0 if not available)
-    model_edge = prediction.get('edge', 0) or 0
-
     row = {
         'date': target_date,
         'game': game_str,
         'pick': pick_str,
         'spread': prediction['spread'],
-        'flag_score': flag_score,
-        'model_edge': model_edge,
+        'zone': zone,
+        'edge_vs_vegas': round(edge, 1) if edge else 0,
+        'vegas_spread': prediction.get('vegas_spread'),
         'result': '',
         'margin': '',
         'clv': ''
@@ -84,225 +170,93 @@ def log_flagged_pick(prediction: Dict, target_date: str, flag_score: int) -> boo
     return True
 
 
-def calculate_flag_score(prediction: Dict) -> int:
-    """
-    Calculate flag score for a prediction.
-
-    PROVEN SIGNAL (backtest 123 games, 2025-12-25 to 2026-01-24):
-    - injury_adj == 0 covers at 62.5% (p=0.018) - THIS IS THE EDGE
-    - injury_adj > 0 covers at only 36.3% - no edge
-
-    The ABSENCE of injury adjustment is the signal, not the presence.
-    When injury_adj == 0, the model's base prediction is uncontaminated
-    by potentially inaccurate injury estimates.
-
-    Scoring:
-    - injury_adj == 0: +5 (proven signal)
-    - injury_adj > 0: 0 (neutral, no penalty)
-    - Small spread (<3): +3 (72.7% historical)
-    - B2B fade opportunity: +3 (71.4% historical)
-    """
-    score = 0
-
-    injury_adj = abs(prediction.get('injury_adjustment', 0))
-    spread = prediction['spread']
-    home_b2b = prediction.get('home_is_b2b', False)
-    away_b2b = prediction.get('away_is_b2b', False)
-    has_b2b = home_b2b or away_b2b
-
-    # INVERTED LOGIC: injury_adj == 0 is the signal (proven edge)
-    # injury_adj > 0 is neutral (no penalty, no bonus)
-    if injury_adj == 0:
-        score += 5  # Proven signal: 62.5% coverage rate
-    # Note: injury_adj > 0 adds nothing (neutral)
-
-    # Additional factors
-    if spread < 3:
-        score += 3  # Small spread: 72.7% historical
-
-    if has_b2b:
-        score += 3  # B2B fade: 71.4% historical
-
-    return score
-
-
-def categorize_game(prediction: Dict) -> str:
-    """
-    Categorize a game prediction into Green/Yellow/Red zone.
-
-    Based on backtest findings (123 games):
-
-    GREEN (Best Bets - 73.3% historical win rate):
-        - Spread < 3 points OR
-        - B2B fade opportunity (one team on B2B)
-        (15 games, 11-4 record in backtest)
-
-    YELLOW (Signal Games - 62.5% historical win rate):
-        - All other games with injury_adj = 0
-        (17 games, 9-8 record in backtest)
-
-    RED (Skip - 36.3% historical win rate):
-        - Games with injury adjustments > 0
-        (91 games, 33-58 record in backtest)
-
-        NOTE: Since injury adjustments are disabled, RED zone only triggers
-        if injury logic is re-enabled in the future.
-
-    Args:
-        prediction: Prediction dict from generate_prediction()
-
-    Returns:
-        "GREEN", "YELLOW", or "RED"
-    """
-    flag_score = calculate_flag_score(prediction)
-
-    # Zone thresholds based on flag_score:
-    # - GREEN (8+): Has signal (+5) plus at least one factor (+3)
-    # - YELLOW (5-7): Has signal (+5) but no additional factors
-    # - RED (<5): No signal (injury_adj > 0)
-    if flag_score >= 8:
-        return "GREEN"
-    elif flag_score >= 5:
-        return "YELLOW"
-    else:
-        return "RED"
-
-
-def get_zone_stats() -> Dict[str, str]:
-    """Return historical win rates for each zone."""
-    return {
-        'GREEN': '73.3% (11-4 in 15 games)',
-        'YELLOW': '62.5% (9-8 in 17 games, includes 52.9% for mid-spread 3-7)',
-        'RED': '36.3% (33-58 in 91 games) - SKIP'
-    }
-
-
-def format_ai_review_game(prediction: Dict, rank: int, zone: str) -> List[str]:
-    """
-    Format a single game for AI review output.
-
-    Args:
-        prediction: Prediction dict
-        rank: Game rank/number in the zone
-        zone: "GREEN", "YELLOW", or "RED"
-
-    Returns:
-        List of formatted lines for this game
-    """
+def format_ai_review_game(prediction: Dict, rank: int, zone: str, edge: float) -> List[str]:
+    """Format a single game for AI review output."""
     lines = []
 
-    # Identify why this game is in GREEN zone
     spread = prediction['spread']
     home_b2b = prediction.get('home_is_b2b', False)
     away_b2b = prediction.get('away_is_b2b', False)
-    has_b2b = home_b2b or away_b2b
 
-    reason = []
-    if zone == "GREEN":
-        if spread < 3:
-            reason.append(f"Small Spread ({spread:.1f}) - 72.7% historical")
-        if has_b2b:
-            b2b_team = prediction['home_team'] if home_b2b else prediction['away_team']
-            reason.append(f"B2B Fade ({b2b_team}) - 71.4% historical")
-    elif zone == "YELLOW":
-        reason.append("Signal game - 62.5% historical")
+    # Build reason
+    reasons = []
+    reasons.append(f"Model +{edge:.1f} vs Vegas")
 
-    # Main line: Rank, matchup, spread, favorite
+    if spread < 3:
+        reasons.append(f"Small spread ({spread:.1f})")
+    if home_b2b or away_b2b:
+        b2b_team = prediction['home_team'] if home_b2b else prediction['away_team']
+        reasons.append(f"B2B ({b2b_team})")
+
+    # Zone marker
+    zone_markers = {
+        'PLATINUM': '💎 PLATINUM',
+        'GOLD': '🥇 GOLD',
+        'SILVER': '🥈 SILVER'
+    }
+    marker = zone_markers.get(zone, zone)
+
+    # Main line
     game_str = f"{prediction['away_team']} @ {prediction['home_team']}"
-    main_line = f"{rank}. {game_str} | {prediction['favorite']} -{spread:.1f}"
-
-    if zone == "GREEN":
-        main_line = f"**BEST BET** {main_line}"
-    elif zone == "YELLOW":
-        main_line = f"SIGNAL {main_line}"
-
+    main_line = f"{marker} {rank}. {game_str} | {prediction['favorite']} -{spread:.1f}"
     lines.append(main_line)
 
-    # Reason line
-    if reason:
-        lines.append(f"   Reason: {' + '.join(reason)}")
+    # Reason
+    lines.append(f"   Reason: {' + '.join(reasons)}")
 
-    # Team stats line
-    home_record = prediction['home_last10_record']
-    away_record = prediction['away_last10_record']
-    home_ppg = prediction['home_last10_ppg']
-    home_oppg = prediction['home_last10_oppg']
-    away_ppg = prediction['away_last10_ppg']
-    away_oppg = prediction['away_last10_oppg']
+    # Stats
+    lines.append(f"   {prediction['home_team']}: {prediction['home_last10_record']}, {prediction['home_last10_ppg']:.0f}/{prediction['home_last10_oppg']:.0f} PPG/OPPG")
+    lines.append(f"   {prediction['away_team']}: {prediction['away_last10_record']}, {prediction['away_last10_ppg']:.0f}/{prediction['away_last10_oppg']:.0f} PPG/OPPG")
 
-    # B2B and rest flags
-    home_rest = prediction.get('home_rest_summary', 'REST: 1d')
-    away_rest = prediction.get('away_rest_summary', 'REST: 1d')
-
-    stats_line = f"   {prediction['home_team']}: {home_record}, {home_ppg:.0f}/{home_oppg:.0f} | {home_rest}"
-    lines.append(stats_line)
-
-    stats_line2 = f"   {prediction['away_team']}: {away_record}, {away_ppg:.0f}/{away_oppg:.0f} | {away_rest}"
-    lines.append(stats_line2)
-
-    # Vegas line comparison
+    # Vegas comparison
     if prediction.get('vegas_spread') is not None:
         vegas_spread = prediction['vegas_spread']
-        if vegas_spread > 0:
-            vegas_favorite = prediction['home_team']
-            vegas_line = f"{vegas_favorite} -{abs(vegas_spread):.1f}"
-        else:
-            vegas_favorite = prediction['away_team']
-            vegas_line = f"{vegas_favorite} -{abs(vegas_spread):.1f}"
+        vegas_fav = prediction['home_team'] if vegas_spread < 0 else prediction['away_team']
+        vegas_line = f"{vegas_fav} -{abs(vegas_spread):.1f}"
+        lines.append(f"   Vegas: {vegas_line} | Our Edge: +{edge:.1f}")
 
-        edge = prediction.get('edge', 0)
-        vegas_line_str = f"   Vegas: {vegas_line} | Edge: {edge:+.1f}"
-        lines.append(vegas_line_str)
-
-    lines.append("")  # Blank line between games
-
+    lines.append("")
     return lines
 
 
 def generate_ai_review_file(predictions: List[Dict], target_date: str, output_dir) -> str:
-    """
-    Generate AI review file with games categorized into zones.
-
-    Args:
-        predictions: List of prediction dicts
-        target_date: Date string (YYYY-MM-DD)
-        output_dir: Output directory path
-
-    Returns:
-        Path to generated file
-    """
+    """Generate AI review file with games categorized into tiers."""
     from pathlib import Path
 
-    # Categorize all predictions and auto-log flagged picks
-    green_games = []
-    yellow_games = []
-    red_games = []
+    # Categorize all predictions
+    platinum_games = []
+    gold_games = []
+    silver_games = []
+    skip_games = []
     logged_count = 0
 
     for pred in predictions:
-        zone = categorize_game(pred)
-        flag_score = calculate_flag_score(pred)
+        zone, edge = categorize_game(pred)
+        pred['_zone'] = zone
+        pred['_edge'] = edge
 
-        if zone == "GREEN":
-            green_games.append(pred)
-            # Auto-log GREEN picks to results.csv
-            if log_flagged_pick(pred, target_date, flag_score):
+        if zone == "PLATINUM":
+            platinum_games.append(pred)
+            if log_flagged_pick(pred, target_date, zone, edge):
                 logged_count += 1
-        elif zone == "YELLOW":
-            yellow_games.append(pred)
-            # Auto-log YELLOW picks to results.csv
-            if log_flagged_pick(pred, target_date, flag_score):
+        elif zone == "GOLD":
+            gold_games.append(pred)
+            if log_flagged_pick(pred, target_date, zone, edge):
                 logged_count += 1
-        else:  # RED
-            red_games.append(pred)
+        elif zone == "SILVER":
+            silver_games.append(pred)
+            if log_flagged_pick(pred, target_date, zone, edge):
+                logged_count += 1
+        else:
+            skip_games.append(pred)
 
     if logged_count > 0:
-        print(f"[AUTO-LOG] Logged {logged_count} flagged picks to {RESULTS_CSV}")
+        print(f"[AUTO-LOG] Logged {logged_count} picks to {RESULTS_CSV}")
 
-    # Sort GREEN by spread (smallest first for best opportunities)
-    green_games.sort(key=lambda x: x['spread'])
-    # Sort YELLOW by spread as well
-    yellow_games.sort(key=lambda x: x['spread'])
+    # Sort by edge (highest first)
+    platinum_games.sort(key=lambda x: x['_edge'] or 0, reverse=True)
+    gold_games.sort(key=lambda x: x['_edge'] or 0, reverse=True)
+    silver_games.sort(key=lambda x: x['_edge'] or 0, reverse=True)
 
     # Generate output
     output_file = Path(output_dir) / f"ai_review_{target_date}.txt"
@@ -310,58 +264,71 @@ def generate_ai_review_file(predictions: List[Dict], target_date: str, output_di
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
-        f.write(f"AI BETTING REVIEW - {target_date}\n")
+        f.write(f"AXIOM BETTING PICKS - {target_date}\n")
         f.write("=" * 80 + "\n\n")
 
-        f.write(f"Total Games: {len(predictions)}\n")
-        f.write(f"GREEN (Best Bets): {len(green_games)} | YELLOW (Signal): {len(yellow_games)} | RED (Skip): {len(red_games)}\n")
-        f.write("\n" + "=" * 80 + "\n\n")
-
-        # Green Zone
-        if green_games:
-            f.write(f"=== **BEST BET** BEST BETS (GREEN ZONE - {zone_stats['GREEN']}) ===\n\n")
-            for i, pred in enumerate(green_games, 1):
-                lines = format_ai_review_game(pred, i, "GREEN")
-                for line in lines:
-                    f.write(line + "\n")
-        else:
-            f.write(f"=== **BEST BET** BEST BETS (GREEN ZONE - {zone_stats['GREEN']}) ===\n\n")
-            f.write("No GREEN zone games today.\n\n")
-
-        # Yellow Zone
-        if yellow_games:
-            f.write("=" * 80 + "\n")
-            f.write(f"=== SIGNAL SIGNAL GAMES (YELLOW ZONE - {zone_stats['YELLOW']}) ===\n\n")
-            for i, pred in enumerate(yellow_games, 1):
-                lines = format_ai_review_game(pred, i, "YELLOW")
-                for line in lines:
-                    f.write(line + "\n")
-        else:
-            f.write("=" * 80 + "\n")
-            f.write(f"=== SIGNAL SIGNAL GAMES (YELLOW ZONE - {zone_stats['YELLOW']}) ===\n\n")
-            f.write("No YELLOW zone games today.\n\n")
-
-        # Red Zone (skipped)
-        f.write("=" * 80 + "\n")
-        f.write(f"=== SKIP SKIP ({len(red_games)} games with injury adjustment) ===\n\n")
-        if red_games:
-            for pred in red_games:
-                game_str = f"{pred['away_team']} @ {pred['home_team']}"
-                injury_adj = abs(pred.get('injury_adjustment', 0))
-                f.write(f"- {game_str}: adj {injury_adj:.1f}\n")
-        else:
-            f.write("None (injury adjustments disabled)\n")
-
-        f.write("\n" + "=" * 80 + "\n")
-        f.write("LEGEND:\n")
-        f.write("-" * 80 + "\n")
-        f.write(f"**BEST BET** GREEN = Signal + (Small Spread OR B2B) = {zone_stats['GREEN']}\n")
-        f.write(f"SIGNAL YELLOW = Signal only = {zone_stats['YELLOW']}\n")
-        f.write(f"SKIP RED = Has injury adjustment = {zone_stats['RED']}\n")
+        total_plays = len(platinum_games) + len(gold_games) + len(silver_games)
+        f.write(f"Total Games: {len(predictions)} | Plays: {total_plays}\n")
+        f.write(f"PLATINUM: {len(platinum_games)} | GOLD: {len(gold_games)} | SILVER: {len(silver_games)} | SKIP: {len(skip_games)}\n")
         f.write("\n")
-        f.write("Backtest validation: 123 games (2025-12-25 to 2026-01-24)\n")
-        f.write("Signal = injury_adj == 0 (base model without injury adjustments)\n")
-        f.write("B2B = Back-to-back game (team played yesterday)\n")
+
+        # PLATINUM
+        f.write("=" * 80 + "\n")
+        f.write(f"💎 PLATINUM TIER - {zone_stats['PLATINUM']}\n")
+        f.write("=" * 80 + "\n\n")
+        if platinum_games:
+            for i, pred in enumerate(platinum_games, 1):
+                lines = format_ai_review_game(pred, i, "PLATINUM", pred['_edge'])
+                f.write("\n".join(lines) + "\n")
+        else:
+            f.write("No PLATINUM plays today.\n\n")
+
+        # GOLD
+        f.write("=" * 80 + "\n")
+        f.write(f"🥇 GOLD TIER - {zone_stats['GOLD']}\n")
+        f.write("=" * 80 + "\n\n")
+        if gold_games:
+            for i, pred in enumerate(gold_games, 1):
+                lines = format_ai_review_game(pred, i, "GOLD", pred['_edge'])
+                f.write("\n".join(lines) + "\n")
+        else:
+            f.write("No GOLD plays today.\n\n")
+
+        # SILVER
+        f.write("=" * 80 + "\n")
+        f.write(f"🥈 SILVER TIER - {zone_stats['SILVER']}\n")
+        f.write("=" * 80 + "\n\n")
+        if silver_games:
+            for i, pred in enumerate(silver_games, 1):
+                lines = format_ai_review_game(pred, i, "SILVER", pred['_edge'])
+                f.write("\n".join(lines) + "\n")
+        else:
+            f.write("No SILVER plays today.\n\n")
+
+        # SKIP summary
+        f.write("=" * 80 + "\n")
+        f.write(f"SKIP ({len(skip_games)} games) - No edge or model favors away\n")
+        f.write("=" * 80 + "\n\n")
+        for pred in skip_games:
+            game_str = f"{pred['away_team']} @ {pred['home_team']}"
+            edge = pred.get('_edge')
+            reason = "No Vegas line" if edge is None else f"Edge {edge:+.1f}" if edge else "Model favors away"
+            f.write(f"  - {game_str}: {reason}\n")
+
+        # Legend
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("STRATEGY (Backtest: 518 games, Oct 2025 - Jan 2026)\n")
+        f.write("-" * 80 + "\n")
+        f.write("Only bet HOME teams where model is 5+ points more bullish than Vegas.\n")
+        f.write("Model excels at finding undervalued home teams (74-84% win rate).\n")
+        f.write("Model FAILS at finding undervalued away teams (43% - losing).\n")
         f.write("=" * 80 + "\n")
 
     return str(output_file)
+
+
+# Legacy function for backwards compatibility
+def calculate_flag_score(prediction: Dict) -> int:
+    """Legacy function - returns edge as int for compatibility."""
+    edge = calculate_home_edge_vs_vegas(prediction)
+    return int(edge) if edge else 0
