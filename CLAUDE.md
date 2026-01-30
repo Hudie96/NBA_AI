@@ -1,133 +1,104 @@
-# AXIOM - NBA Betting & Content System
+# AXIOM - NBA Betting System
 
 ## Project Vision
-Data-driven NBA betting system + content engine for social media marketing.
-Two outputs: profitable picks AND engaging content that builds an audience.
+Data-driven NBA betting system focused on spread predictions with backtested edge.
 
-## Current State (as of 2026-01-26)
+## Current State (as of 2026-01-30)
 
-### What's Built
-- Database infrastructure (SQLite, 750K+ rows)
-- Schedule, boxscore, betting line, injury data pipelines
-- Daily prediction generator with Vegas comparison
-- Flag scoring system based on backtested signals
-- Results tracking (auto-log picks, manual result updates)
-- Backtest framework validating signal efficacy
-- REST/B2B detection for fatigue factors
+### The Edge (518-game backtest, Oct 2025 - Jan 2026)
+Model excels at finding undervalued HOME teams, fails at away teams.
 
-### What's In Progress
-- Live result tracking (results.csv created, needs daily updates)
-- CLV (closing line value) measurement
+| Tier | Win Rate | Record | ROI | Criteria |
+|------|----------|--------|-----|----------|
+| PLATINUM | 84.4% | 38-7 | +61% | GREEN zone + Model +7 vs Vegas on HOME |
+| GOLD | 78.9% | 56-15 | +51% | GREEN zone + Model +5 vs Vegas on HOME |
+| SILVER | 74.4% | 99-34 | +42% | Model +5 vs Vegas on HOME (any zone) |
+| SKIP | — | — | — | Model favors away OR edge < 5 |
 
-### What's Planned
-- Player props engine
-- Content generation for social media
-- Bankroll/Kelly sizing calculator
-- Social media distribution automation
-- Performance dashboard
+GREEN zone = Small spread (<3) OR B2B situation
 
 ## Tech Stack
 - Database: SQLite (data/NBA_AI_current.sqlite)
 - Language: Python 3.x
-- Key libs: pandas, numpy, sqlite3, requests
+- Key libs: pandas, numpy, sqlite3, nba_api
 
-## Key Files
+## Scripts (17 total)
 
-### Scripts (scripts/)
-| File | Purpose |
-|------|---------|
-| `daily_predictions.py` | Main pipeline - generates daily picks |
-| `flag_system.py` | Calculates flag_score, categorizes GREEN/YELLOW/RED |
-| `shared_utils.py` | Shared functions (get_team_recent_games, calculate_team_stats) |
-| `injury_impact.py` | Injury adjustment calculations (currently disabled) |
-| `rest_detection.py` | B2B and rest day detection |
-| `backtest.py` | Historical validation of signals |
+### Core Pipeline
+| Script | Purpose |
+|--------|---------|
+| `run_daily.py` | **Master script** - runs everything in order |
+| `daily_predictions.py` | Generate daily picks with tier classification |
+| `flag_system.py` | PLATINUM/GOLD/SILVER/SKIP categorization |
+| `refresh_all_data.py` | Update all data sources |
+
+### Utilities
+| Script | Purpose |
+|--------|---------|
+| `shared_utils.py` | Team stats calculation |
+| `rest_detection.py` | B2B and rest pattern detection |
+| `injury_impact.py` | Injury adjustments (currently disabled) |
+| `props_validator.py` | Validate player props |
+
+### Results Tracking
+| Script | Purpose |
+|--------|---------|
 | `log_result.py` | Log new picks to results.csv |
 | `update_result.py` | Update pick outcomes |
 
-### Database Updaters (src/database_updater/)
-| File | Purpose |
-|------|---------|
-| `schedule.py` | Fetch NBA schedule from API |
-| `boxscores.py` | Player and team box scores |
-| `betting.py` | Vegas lines from ESPN/Covers |
-| `nba_official_injuries.py` | Injury reports |
-
-## The Proven Signal
-
-Backtest (123 games, 2025-12-25 to 2026-01-24):
-
-```
-injury_adj = 0  →  62.5% cover rate (p=0.018) ← THE EDGE
-injury_adj > 0  →  36.3% cover rate (skip these)
-
-Signal + spread < 3  →  72.7%
-Signal + B2B fade    →  71.4%
-```
-
-**Flag Score Calculation:**
-- +5 if injury_adj == 0 (proven signal)
-- +3 if spread < 3 (small spread bonus)
-- +3 if opponent on B2B (fatigue factor)
-
-**Zone Thresholds:**
-- GREEN: flag_score >= 8 (Best bets)
-- YELLOW: flag_score >= 5 (Signal only)
-- RED: flag_score < 5 (Skip)
+### Analysis & Content
+| Script | Purpose |
+|--------|---------|
+| `backtest_daily_pipeline.py` | Validate strategies historically |
+| `find_edges.py` | Props edge finder |
+| `project_props.py` | Player prop projections |
+| `generate_daily_report.py` | Daily report generation |
+| `generate_card.py` | Betting card images |
+| `generate_nuggets.py` | Social content nuggets |
+| `ai_verify_picks.py` | AI verification |
 
 ## Daily Workflow
 
 ```bash
-# 1. Update schedule (if needed)
-python -m src.database_updater.schedule --season=2024-2025
+# Full pipeline (data refresh + predictions)
+python scripts/run_daily.py
 
-# 2. Generate predictions
-python scripts/daily_predictions.py
+# Quick mode (skip slow fetches)
+python scripts/run_daily.py --quick
 
-# 3. Review ai_review_DATE.txt for GREEN/YELLOW picks
-# 4. Picks auto-logged to data/results.csv
+# Predictions only (use existing data)
+python scripts/run_daily.py --predictions
 
-# 5. After games, update results
-python scripts/update_result.py "2026-01-26" "BOS @ CHI" "W" 5 0.5
+# With content generation
+python scripts/run_daily.py --content
+
+# Specific date
+python scripts/run_daily.py --date 2026-01-30
+
+# After games complete, update results
+python scripts/update_result.py "2026-01-30" "BOS @ CHI" "W" 5 0.5
 ```
 
-## Database Schema
+## Output Files
 
-| Table | Rows | Purpose |
-|-------|------|---------|
-| Games | 2,149 | Schedule metadata |
-| GameStates | 331,193 | Game state snapshots |
-| PlayerBox | 14,975 | Player stats |
-| Betting | 677 | Vegas lines |
-| InjuryReports | 13,034 | Injury data |
-
-Date range: 2024-10-04 to 2026-01-24
+| File | Contents |
+|------|----------|
+| `outputs/ai_review_DATE.txt` | PLATINUM/GOLD/SILVER picks |
+| `outputs/predictions_DATE.json` | Full prediction data |
+| `data/results.csv` | Historical pick tracking |
 
 ## Commands
 
-| Command | Action |
-|---------|--------|
-| "Run predictions" | `python scripts/daily_predictions.py` |
-| "Log pick" | `python scripts/log_result.py "GAME" "PICK" spread flag_score edge` |
-| "Update result" | `python scripts/update_result.py "DATE" "GAME" "W/L" margin clv` |
-| "Backtest" | `python scripts/backtest.py` |
-| "Update schedule" | `python -m src.database_updater.schedule --season=2024-2025` |
-
-## Project Goals
-
-1. **BETTING**: Validate edge with live tracking, achieve >55% hit rate on GREEN zone
-2. **CONTENT**: Generate daily insights and player stats for social media
-3. **MONETIZATION**: Build audience → paid picks service + affiliate revenue
-
-## On-Demand Context
-
-- `@docs/AXIOM_ARCHITECTURE.md` - Visual system diagram
-- `@DATA_MODEL.md` - Database schema details
-- `@decisions.md` - Architectural decisions log
+| Say | Runs |
+|-----|------|
+| "Run daily" | `python scripts/run_daily.py` |
+| "Quick predictions" | `python scripts/run_daily.py --quick --predictions` |
+| "Update result" | `python scripts/update_result.py DATE GAME W/L margin` |
+| "Backtest" | `python scripts/backtest_daily_pipeline.py` |
 
 ## Critical Rules
 
+- **Only bet HOME teams** where model is 5+ points more bullish than Vegas
+- **Model fails at away teams** (43.4% - losing strategy)
 - **Data freshness**: Predictions require data within 7 days
-- **Anti-hallucination**: Only cite stats from database queries
-- **PA-legal markets only**: DraftKings, FanDuel, BetMGM, ESPN BET
-- **Injury signal**: injury_adj = 0 IS the edge (inverted from intuition)
+- **PA-legal markets**: DraftKings, FanDuel, BetMGM, ESPN BET
