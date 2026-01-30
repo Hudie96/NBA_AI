@@ -43,6 +43,12 @@ from scripts.project_props import (
     STATS,
     STAT_COLS
 )
+from scripts.props_validator import (
+    validate_prop,
+    get_valid_players_for_props,
+    get_todays_games,
+    is_player_playing_today,
+)
 
 DB_PATH = config["database"]["path"]
 
@@ -182,13 +188,28 @@ def get_player_season_games(player_name, conn):
     return df.iloc[0]["games"]
 
 
-def find_edge(player_name, opponent, stat, line, conn):
+def find_edge(player_name, opponent, stat, line, conn, target_date=None, validate=True):
     """
     Find edge between our projection and the line.
+
+    Args:
+        player_name: Player name
+        opponent: Opponent team abbreviation
+        stat: Stat type (PTS, REB, AST, etc.)
+        line: Betting line
+        conn: Database connection
+        target_date: Date to validate against (None = today)
+        validate: If True, validate player is playing on target_date
 
     Returns:
         dict with edge details or None if no edge
     """
+    # Validate that player is actually playing on this date
+    if validate:
+        is_valid, error = validate_prop(player_name, opponent, conn, target_date)
+        if not is_valid:
+            return None
+
     # Get projection
     position = get_player_position(player_name, conn)
     proj = project_player_prop(player_name, opponent, stat, conn, position)
@@ -312,10 +333,82 @@ def display_edge(edge):
     print(f"   DVP Rank: {factors['dvp_rank']} | DVP Adj: {factors['dvp_adj']:+.1f}")
 
 
+def find_edges_for_today(conn, target_date=None, all_stats=False, min_games=20):
+    """
+    Find edges for all players playing on target date.
+
+    This is the VALIDATED way to generate props - only includes players
+    whose teams are actually playing on the target date.
+
+    Args:
+        conn: Database connection
+        target_date: Date to find edges for (None = today)
+        all_stats: If True, include non-profitable stats
+        min_games: Minimum games for player to be included
+
+    Returns:
+        List of edge dicts
+    """
+    from datetime import date as dt
+    if target_date is None:
+        target_date = dt.today().isoformat()
+
+    print(f"=== FINDING PROPS EDGES FOR {target_date} ===\n")
+
+    # Get games for this date
+    games = get_todays_games(conn, target_date)
+    if not games:
+        print(f"No games found for {target_date}")
+        return []
+
+    print(f"Games: {len(games)}")
+    for g in games:
+        print(f"  {g['away_team']} @ {g['home_team']}")
+    print()
+
+    # Get valid players
+    valid_players = get_valid_players_for_props(conn, target_date, min_games)
+    print(f"Players with {min_games}+ games: {len(valid_players)}")
+
+    build_player_positions_table(conn)
+
+    # Sample lines for each player (in production, these come from sportsbook API)
+    # For now, we use their season averages as proxy lines
+    all_edges = []
+
+    for player_info in valid_players:
+        player_name = player_info["player_name"]
+        opponent = player_info["opponent"]
+
+        # Get player's season averages to use as proxy lines
+        position = get_player_position(player_name, conn)
+
+        for stat in PROFITABLE_STATS if not all_stats else STATS:
+            proj = project_player_prop(player_name, opponent, stat, conn, position)
+            if proj and proj["season_avg"]:
+                # Use season avg as proxy line (in production, use real lines)
+                line = proj["season_avg"]
+
+                edge = find_edge(
+                    player_name, opponent, stat, line, conn,
+                    target_date=target_date, validate=False  # Already validated
+                )
+
+                if edge and edge["confidence"] != "NONE":
+                    all_edges.append(edge)
+
+    # Sort by confidence score
+    all_edges.sort(key=lambda x: x["confidence_score"], reverse=True)
+
+    print(f"\nFound {len(all_edges)} edges")
+    return all_edges
+
+
 def test_edge_finder(conn, all_stats=False):
-    """Test edge finder with sample data."""
-    print("=== EDGE FINDER TEST ===")
+    """Test edge finder with sample data (uses hardcoded matchups - for testing only)."""
+    print("=== EDGE FINDER TEST (STATIC MATCHUPS - FOR TESTING ONLY) ===")
     print(f"Mode: {'All stats' if all_stats else 'Validated stats (PTS/REB/AST/3PM + combos)'}\n")
+    print("WARNING: These are hardcoded test matchups, not validated for today's games.\n")
 
     build_player_positions_table(conn)
 
@@ -395,7 +488,9 @@ def main():
     parser.add_argument("--stat", type=str, help="Stat type (PTS, REB, AST, 3PM)")
     parser.add_argument("--line", type=float, help="Betting line")
     parser.add_argument("--file", type=str, help="CSV file with lines")
-    parser.add_argument("--test", action="store_true", help="Test mode")
+    parser.add_argument("--test", action="store_true", help="Test mode (static matchups)")
+    parser.add_argument("--today", action="store_true", help="Find edges for today's games (validated)")
+    parser.add_argument("--date", type=str, help="Target date for --today (YYYY-MM-DD)")
     parser.add_argument("--save", action="store_true", help="Save edges to database")
     parser.add_argument("--all-stats", action="store_true", help="Include all stats (not just PTS/AST)")
 
@@ -403,6 +498,29 @@ def main():
 
     conn = sqlite3.connect(DB_PATH)
     build_player_positions_table(conn)
+
+    if args.today:
+        edges = find_edges_for_today(
+            conn,
+            target_date=args.date,
+            all_stats=args.all_stats
+        )
+        for edge in edges[:20]:  # Show top 20
+            display_edge(edge)
+
+        print("\n" + "=" * 50)
+        print("SUMMARY")
+        print("=" * 50)
+        high = len([e for e in edges if e["confidence"] == "HIGH"])
+        med = len([e for e in edges if e["confidence"] == "MEDIUM"])
+        low = len([e for e in edges if e["confidence"] == "LOW"])
+        print(f"HIGH: {high} | MEDIUM: {med} | LOW: {low}")
+
+        if args.save:
+            count = save_edges_to_db(edges, conn)
+            print(f"\nSaved {count} edges to database")
+        conn.close()
+        return 0
 
     if args.test:
         edges = test_edge_finder(conn, all_stats=args.all_stats)
