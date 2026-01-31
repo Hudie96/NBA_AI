@@ -58,33 +58,31 @@ def get_player_team(player_name, conn):
     """
     Get the team a player is currently on.
 
-    Checks multiple sources:
-    1. player_positions table (from roster fetch)
-    2. Most recent game in player_game_logs
-    3. PlayerBox table
+    Checks PlayerBox first (current season), then falls back to player_game_logs.
 
     Returns:
         Team abbreviation or None if not found
     """
-    # Try player_game_logs first (most recent)
+    # Try PlayerBox first (current season data, joined with Games for date ordering)
     result = conn.execute("""
-        SELECT team
-        FROM player_game_logs
-        WHERE player_name = ?
-        ORDER BY game_date DESC
+        SELECT t.abbreviation
+        FROM PlayerBox pb
+        JOIN Teams t ON pb.team_id = t.team_id
+        JOIN Games g ON pb.game_id = g.game_id
+        WHERE pb.player_name = ?
+        ORDER BY g.date_time_utc DESC
         LIMIT 1
     """, (player_name,)).fetchone()
 
     if result:
         return result[0]
 
-    # Try PlayerBox (has team_id, need to join with Teams)
+    # Fall back to player_game_logs (older seasons)
     result = conn.execute("""
-        SELECT t.abbreviation
-        FROM PlayerBox pb
-        JOIN Teams t ON pb.team_id = t.team_id
-        WHERE pb.player_name = ?
-        ORDER BY pb.game_id DESC
+        SELECT team
+        FROM player_game_logs
+        WHERE player_name = ?
+        ORDER BY game_date DESC
         LIMIT 1
     """, (player_name,)).fetchone()
 
@@ -116,11 +114,14 @@ def is_player_playing_today(player_name, conn, target_date=None):
     return False, team, None
 
 
-def get_valid_players_for_props(conn, target_date=None, min_games=20):
+def get_valid_players_for_props(conn, target_date=None, min_games=20, recent_days=30):
     """
     Get all players who:
     1. Are on a team playing today
     2. Have enough game history for projections
+    3. Have played recently (within recent_days)
+
+    Uses PlayerBox table for current season data.
 
     Returns:
         List of dicts with player_name, team, opponent
@@ -133,17 +134,25 @@ def get_valid_players_for_props(conn, target_date=None, min_games=20):
     if not teams_playing:
         return []
 
-    # Get players with enough games on teams playing today
+    # Get players from PlayerBox (current season) with enough games
+    # AND who have played within the last recent_days
     placeholders = ",".join(["?" for _ in teams_playing])
 
     players = conn.execute(f"""
-        SELECT player_name, team, COUNT(*) as games
-        FROM player_game_logs
-        WHERE team IN ({placeholders})
-        GROUP BY player_name, team
+        SELECT
+            pb.player_name,
+            t.abbreviation as team,
+            COUNT(DISTINCT pb.game_id) as games,
+            MAX(DATE(g.date_time_utc)) as last_game
+        FROM PlayerBox pb
+        JOIN Teams t ON pb.team_id = t.team_id
+        JOIN Games g ON pb.game_id = g.game_id
+        WHERE t.abbreviation IN ({placeholders})
+        GROUP BY pb.player_name, t.abbreviation
         HAVING games >= ?
+        AND DATE(last_game) >= DATE(?, '-' || ? || ' days')
         ORDER BY games DESC
-    """, (*teams_playing, min_games)).fetchall()
+    """, (*teams_playing, min_games, target_date, recent_days)).fetchall()
 
     # Match each player to their opponent
     games = get_todays_games(conn, target_date)
@@ -153,7 +162,8 @@ def get_valid_players_for_props(conn, target_date=None, min_games=20):
         game_lookup[g["away_team"]] = g["home_team"]
 
     valid_players = []
-    for player_name, team, games_count in players:
+    for row in players:
+        player_name, team, games_count = row[0], row[1], row[2]
         opponent = game_lookup.get(team)
         if opponent:
             valid_players.append({
