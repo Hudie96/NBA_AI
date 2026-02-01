@@ -488,6 +488,8 @@ def find_edges_for_today(conn, target_date=None, all_stats=False, min_games=20):
                 )
 
                 if edge and edge["confidence"] != "NONE":
+                    # Add team info from player_info
+                    edge["team"] = player_info.get("team", "")
                     all_edges.append(edge)
 
     # Sort by confidence score
