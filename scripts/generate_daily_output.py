@@ -707,10 +707,29 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     return filepath
 
 
+def calculate_roi(wins, losses):
+    """Calculate ROI assuming -110 standard juice."""
+    if wins + losses == 0:
+        return 0
+    # Win pays +100, loss costs -110
+    profit = (wins * 100) - (losses * 110)
+    total_risked = (wins + losses) * 110
+    return (profit / total_risked) * 100 if total_risked > 0 else 0
+
+
+def make_progress_bar(pct, width=20):
+    """Create ASCII progress bar."""
+    filled = int(pct / 100 * width)
+    empty = width - filled
+    bar = "█" * filled + "░" * empty
+    return f"[{bar}] {pct:.1f}%"
+
+
 def update_performance_tracker():
-    """Update cumulative performance spreadsheet."""
+    """Update cumulative performance with nice formatted output."""
     results_file = PROJECT_ROOT / "data" / "results.csv"
     performance_file = PERFORMANCE_DIR / "performance_tracker.csv"
+    performance_txt = PERFORMANCE_DIR / "PERFORMANCE.txt"
 
     if not results_file.exists():
         return None
@@ -718,64 +737,146 @@ def update_performance_tracker():
     # Read all results
     with open(results_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        results = list(reader)
+        results = [r for r in reader if r.get('result') in ['W', 'L']]
+
+    if not results:
+        return None
 
     # Calculate stats by date and type
     from collections import defaultdict
-    daily_stats = defaultdict(lambda: {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}, 'TOTAL': {'W': 0, 'L': 0}, 'ML': {'W': 0, 'L': 0}})
+    daily_stats = defaultdict(lambda: {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}})
 
     for r in results:
-        if r['result'] in ['W', 'L']:
-            bet_type = r['bet_type'] if r['bet_type'] in ['SPREAD', 'PROP', 'TOTAL', 'ML'] else 'PROP'
-            daily_stats[r['date']][bet_type][r['result']] += 1
+        bet_type = r.get('bet_type', 'PROP')
+        if bet_type not in ['SPREAD', 'PROP']:
+            bet_type = 'PROP'
+        daily_stats[r['date']][bet_type][r['result']] += 1
 
-    # Calculate cumulative
-    rows = []
-    cumulative = {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}, 'TOTAL': {'W': 0, 'L': 0}, 'ML': {'W': 0, 'L': 0}}
+    # Calculate cumulative totals
+    spread_w = sum(d['SPREAD']['W'] for d in daily_stats.values())
+    spread_l = sum(d['SPREAD']['L'] for d in daily_stats.values())
+    prop_w = sum(d['PROP']['W'] for d in daily_stats.values())
+    prop_l = sum(d['PROP']['L'] for d in daily_stats.values())
+    total_w = spread_w + prop_w
+    total_l = spread_l + prop_l
+
+    spread_pct = (spread_w / (spread_w + spread_l) * 100) if (spread_w + spread_l) > 0 else 0
+    prop_pct = (prop_w / (prop_w + prop_l) * 100) if (prop_w + prop_l) > 0 else 0
+    total_pct = (total_w / (total_w + total_l) * 100) if (total_w + total_l) > 0 else 0
+
+    spread_roi = calculate_roi(spread_w, spread_l)
+    prop_roi = calculate_roi(prop_w, prop_l)
+    total_roi = calculate_roi(total_w, total_l)
+
+    # Calculate current streak
+    sorted_results = sorted(results, key=lambda x: x['date'], reverse=True)
+    streak = 0
+    streak_type = sorted_results[0]['result'] if sorted_results else 'W'
+    for r in sorted_results:
+        if r['result'] == streak_type:
+            streak += 1
+        else:
+            break
+
+    # Build nice formatted output
+    lines = []
+    lines.append("=" * 60)
+    lines.append("  AXIOM PERFORMANCE TRACKER")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append(f"  Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"  Tracking since: {min(daily_stats.keys())}")
+    lines.append("")
+
+    # Overall record box
+    lines.append("+" + "-" * 58 + "+")
+    lines.append("|" + " " * 18 + f"OVERALL: {total_w}-{total_l}" + " " * (38 - len(f"OVERALL: {total_w}-{total_l}")) + "|")
+    lines.append("|" + " " * 18 + make_progress_bar(total_pct) + " " * (38 - len(make_progress_bar(total_pct))) + "|")
+    lines.append("|" + " " * 18 + f"ROI: {total_roi:+.1f}%" + " " * (38 - len(f"ROI: {total_roi:+.1f}%")) + "|")
+    lines.append("+" + "-" * 58 + "+")
+    lines.append("")
+
+    # Breakdown by type
+    lines.append("  BREAKDOWN BY TYPE")
+    lines.append("  " + "-" * 40)
+    lines.append("")
+
+    # Spreads
+    lines.append(f"  SPREADS:  {spread_w}-{spread_l}")
+    lines.append(f"            {make_progress_bar(spread_pct)}")
+    lines.append(f"            ROI: {spread_roi:+.1f}%")
+    lines.append("")
+
+    # Props
+    lines.append(f"  PROPS:    {prop_w}-{prop_l}")
+    lines.append(f"            {make_progress_bar(prop_pct)}")
+    lines.append(f"            ROI: {prop_roi:+.1f}%")
+    lines.append("")
+
+    # Current streak
+    streak_emoji = "W" if streak_type == 'W' else "L"
+    lines.append("  " + "-" * 40)
+    lines.append(f"  Current Streak: {streak}{streak_emoji}")
+    lines.append("")
+
+    # Daily breakdown
+    lines.append("  DAILY LOG")
+    lines.append("  " + "-" * 40)
+    lines.append("  Date        Spreads   Props     Daily")
+    lines.append("  " + "-" * 40)
+
+    cumulative = {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}}
+    csv_rows = []
 
     for dt in sorted(daily_stats.keys()):
         stats = daily_stats[dt]
+        day_spread = f"{stats['SPREAD']['W']}-{stats['SPREAD']['L']}"
+        day_prop = f"{stats['PROP']['W']}-{stats['PROP']['L']}"
+        day_total_w = stats['SPREAD']['W'] + stats['PROP']['W']
+        day_total_l = stats['SPREAD']['L'] + stats['PROP']['L']
+        day_total = f"{day_total_w}-{day_total_l}"
 
-        for bet_type in ['SPREAD', 'PROP', 'TOTAL', 'ML']:
-            cumulative[bet_type]['W'] += stats[bet_type]['W']
-            cumulative[bet_type]['L'] += stats[bet_type]['L']
+        cumulative['SPREAD']['W'] += stats['SPREAD']['W']
+        cumulative['SPREAD']['L'] += stats['SPREAD']['L']
+        cumulative['PROP']['W'] += stats['PROP']['W']
+        cumulative['PROP']['L'] += stats['PROP']['L']
 
-        spread_total = cumulative['SPREAD']['W'] + cumulative['SPREAD']['L']
-        prop_total = cumulative['PROP']['W'] + cumulative['PROP']['L']
-        total_all = sum(cumulative[t]['W'] + cumulative[t]['L'] for t in cumulative)
-        total_w = sum(cumulative[t]['W'] for t in cumulative)
+        cum_spread = cumulative['SPREAD']['W'] + cumulative['SPREAD']['L']
+        cum_prop = cumulative['PROP']['W'] + cumulative['PROP']['L']
+        cum_total = cum_spread + cum_prop
+        cum_w = cumulative['SPREAD']['W'] + cumulative['PROP']['W']
 
-        rows.append({
+        lines.append(f"  {dt}  {day_spread:^9} {day_prop:^9} {day_total:^9}")
+
+        csv_rows.append({
             'date': dt,
-            'spread_daily': f"{stats['SPREAD']['W']}-{stats['SPREAD']['L']}",
-            'prop_daily': f"{stats['PROP']['W']}-{stats['PROP']['L']}",
+            'spread_daily': day_spread,
+            'prop_daily': day_prop,
             'spread_cumulative': f"{cumulative['SPREAD']['W']}-{cumulative['SPREAD']['L']}",
             'prop_cumulative': f"{cumulative['PROP']['W']}-{cumulative['PROP']['L']}",
-            'spread_pct': f"{100*cumulative['SPREAD']['W']/spread_total:.1f}%" if spread_total else "N/A",
-            'prop_pct': f"{100*cumulative['PROP']['W']/prop_total:.1f}%" if prop_total else "N/A",
-            'total_cumulative': f"{total_w}-{total_all - total_w}",
-            'total_pct': f"{100*total_w/total_all:.1f}%" if total_all else "N/A",
+            'spread_pct': f"{100*cumulative['SPREAD']['W']/cum_spread:.1f}%" if cum_spread else "N/A",
+            'prop_pct': f"{100*cumulative['PROP']['W']/cum_prop:.1f}%" if cum_prop else "N/A",
+            'total_cumulative': f"{cum_w}-{cum_total - cum_w}",
+            'total_pct': f"{100*cum_w/cum_total:.1f}%" if cum_total else "N/A",
         })
 
-    # Write performance tracker
-    if rows:
+    lines.append("")
+    lines.append("=" * 60)
+
+    # Write formatted text file
+    with open(performance_txt, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    # Write CSV for data analysis
+    if csv_rows:
         fieldnames = ['date', 'spread_daily', 'prop_daily', 'spread_cumulative',
                       'prop_cumulative', 'spread_pct', 'prop_pct', 'total_cumulative', 'total_pct']
-        try:
-            with open(performance_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-        except PermissionError:
-            # Try alternate file
-            alt_file = PERFORMANCE_DIR / f"performance_tracker_{datetime.now().strftime('%H%M%S')}.csv"
-            with open(alt_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-            return alt_file, rows
+        with open(performance_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(csv_rows)
 
-    return performance_file, rows
+    return performance_txt, csv_rows
 
 
 def main():
