@@ -33,6 +33,28 @@ PERFORMANCE_DIR = OUTPUTS_DIR / "performance"
 for d in [PREDICTIONS_DIR, SOCIAL_DIR, PERFORMANCE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Minimum average minutes to be considered a "star" for social content
+MIN_STAR_MINUTES = 25
+
+
+def get_star_players(conn):
+    """Get set of star player names (high minutes, starters)."""
+    result = conn.execute('''
+        SELECT player_name, AVG(min) as avg_min, COUNT(*) as games
+        FROM PlayerBox
+        WHERE min > 0
+        GROUP BY player_name
+        HAVING games >= 10 AND avg_min >= ?
+        ORDER BY avg_min DESC
+    ''', (MIN_STAR_MINUTES,)).fetchall()
+
+    return {row[0] for row in result}
+
+
+def is_star_player(player_name, star_set):
+    """Check if player is a star (in top usage/minutes)."""
+    return player_name in star_set
+
 
 def fetch_betting_lines(conn, target_date):
     """Fetch betting lines for today's games from ESPN."""
@@ -286,11 +308,25 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
     return filepath, rows
 
 
-def get_engagement_stats(conn, target_date, prop_picks):
-    """Generate unique statistical insights for engagement posts."""
+def get_engagement_stats(conn, target_date, prop_picks, star_players=None):
+    """Generate unique statistical insights for engagement posts.
+
+    Only includes star players (25+ min avg) that people actually know.
+    """
     stats_posts = []
 
-    for p in prop_picks[:10]:
+    # Get star players if not provided
+    if star_players is None:
+        star_players = get_star_players(conn)
+
+    # Filter to star players only
+    star_props = [p for p in prop_picks if p['player_name'] in star_players]
+
+    # If no star props, use top props but limit
+    if not star_props:
+        star_props = prop_picks[:5]
+
+    for p in star_props[:10]:
         player_name = p['player_name']
         opponent = p['opponent']
         stat = p.get('stat', p.get('prop_type', ''))
@@ -426,10 +462,17 @@ def get_engagement_stats(conn, target_date, prop_picks):
 
 
 def generate_social_posts(conn, target_date, prop_picks, spread_picks):
-    """Generate social media content - SILVER tier free, premium elsewhere."""
+    """Generate social media content - SILVER tier free, premium elsewhere.
+
+    Only includes STAR players (25+ min avg) in engagement posts.
+    """
     filepath = SOCIAL_DIR / f"posts_{target_date}.txt"
 
     games = get_todays_games(conn, target_date)
+
+    # Get star players for filtering
+    star_players = get_star_players(conn)
+    print(f"      Star players (25+ min avg): {len(star_players)}")
 
     content = []
 
@@ -473,8 +516,8 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     content.append("=" * 60)
     content.append("")
 
-    # Generate engagement stats
-    engagement_stats = get_engagement_stats(conn, target_date, prop_picks)
+    # Generate engagement stats (star players only)
+    engagement_stats = get_engagement_stats(conn, target_date, prop_picks, star_players)
 
     for i, stat in enumerate(engagement_stats, 1):
         content.append("-" * 50)
@@ -547,7 +590,7 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     gold_platinum = [g for g in spread_picks if g.get('spread_tier') in ['GOLD', 'PLATINUM']]
     if gold_platinum:
         content.append("-" * 50)
-        content.append("PREMIUM TEASER")
+        content.append("PREMIUM SPREAD TEASER")
         content.append("-" * 50)
         content.append("")
 
@@ -559,6 +602,24 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
         tweet += f"\nModel edge: {abs(gold_platinum[0].get('spread_edge', 0)):.1f}+ pts\n\n"
         tweet += f"Get picks: [link]\n"
         tweet += f"#NBA #NBABets #PremiumPicks"
+        content.append(tweet)
+        content.append("")
+
+    # Premium star player props teaser
+    star_props = [p for p in prop_picks if p['player_name'] in star_players][:5]
+    if star_props:
+        content.append("-" * 50)
+        content.append("PREMIUM PROPS TEASER (Star Players)")
+        content.append("-" * 50)
+        content.append("")
+
+        tweet = f"Today's S_TIER player props\n\n"
+        for p in star_props[:3]:
+            # Tease the player, not the full pick
+            tweet += f"{p['player_name']} - Edge: {abs(p['edge_pct']):.0f}%\n"
+        tweet += f"\nOur model vs Vegas lines\n"
+        tweet += f"Get full picks: [link]\n\n"
+        tweet += f"#NBA #PlayerProps #NBABets"
         content.append(tweet)
         content.append("")
 

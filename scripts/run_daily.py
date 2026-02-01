@@ -74,11 +74,16 @@ def main():
         if not run_script("verify_data.py", verify_args, required=False):
             print("[WARN] Data verification found issues - review above")
 
-    # Step 1: Data Refresh
+    # Step 1: Data Refresh (team stats, betting lines, etc)
     if not args.predictions:
         refresh_args = ["--quick"] if args.quick else []
         if not run_script("refresh_all_data.py", refresh_args, required=False):
             print("[WARN] Data refresh had issues, continuing with existing data")
+
+    # Step 1b: Update PlayerBox (boxscores for recent games)
+    if not args.predictions and not args.quick:
+        if not run_script("update_boxscores.py", [], required=False):
+            print("[WARN] Boxscore update had issues")
 
     # Step 2: Generate Spread Predictions
     if not args.props_only:
