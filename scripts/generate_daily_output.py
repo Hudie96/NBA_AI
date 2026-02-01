@@ -114,14 +114,26 @@ def get_spread_picks(conn, target_date):
             spread_edge = model_spread - spread
             game_info['spread_edge'] = round(spread_edge, 1)
 
-            # Determine pick
-            if abs(spread_edge) >= 3:
-                if spread_edge > 0:
-                    game_info['spread_pick'] = f"{home_team} {spread:+.1f}"
-                    game_info['spread_tier'] = 'GOLD' if spread_edge >= 5 else 'SILVER'
-                else:
-                    game_info['spread_pick'] = f"{away_team} {-spread:+.1f}"
-                    game_info['spread_tier'] = 'GOLD' if abs(spread_edge) >= 5 else 'SILVER'
+            # Determine pick - ONLY HOME TEAMS PASS (away teams = 43% win rate in backtest)
+            if spread_edge >= 5:
+                # Model favors home team by 5+ points = VALID pick
+                game_info['spread_pick'] = f"{home_team} {spread:+.1f}"
+                if spread_edge >= 7:
+                    game_info['spread_tier'] = 'PLATINUM'
+                elif spread_edge >= 5:
+                    game_info['spread_tier'] = 'GOLD'
+            elif spread_edge >= 3:
+                # Home edge 3-5 = SILVER tier
+                game_info['spread_pick'] = f"{home_team} {spread:+.1f}"
+                game_info['spread_tier'] = 'SILVER'
+            elif spread_edge < 0:
+                # Model favors AWAY team = SKIP (43% win rate, losing strategy)
+                game_info['spread_pick'] = f"{away_team} {-spread:+.1f}"
+                game_info['spread_tier'] = 'SKIP'
+            else:
+                # Edge too small (0-3) = SKIP
+                game_info['spread_pick'] = f"{home_team} {spread:+.1f}"
+                game_info['spread_tier'] = 'SKIP'
 
         if total is not None and model_total is not None:
             total_edge = model_total - total
@@ -236,6 +248,17 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
     # Add spread picks
     for g in spread_picks:
         if g.get('spread_pick'):
+            tier = g.get('spread_tier', 'SKIP')
+            # Confidence based on tier, not just edge size
+            if tier == 'SKIP':
+                confidence = 'SKIP'
+            elif tier == 'PLATINUM':
+                confidence = 'HIGH'
+            elif tier == 'GOLD':
+                confidence = 'HIGH'
+            else:
+                confidence = 'MEDIUM'
+
             rows.append({
                 'date': target_date,
                 'game': g['game'],
@@ -247,8 +270,8 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                 'edge': f"{g['spread_edge']:+.1f}" if g.get('spread_edge') else '',
                 'l10_avg': '',
                 'season_avg': '',
-                'tier': g.get('spread_tier', ''),
-                'confidence': 'HIGH' if abs(g.get('spread_edge', 0)) >= 5 else 'MEDIUM',
+                'tier': tier,
+                'confidence': confidence,
             })
 
         if g.get('total_pick'):
@@ -267,15 +290,10 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                 'confidence': 'MEDIUM',
             })
 
-        # Add ML info (no pick, just info)
-        if g.get('ml_home'):
-            ml_pick = ''
-            if g.get('spread_edge') and abs(g['spread_edge']) >= 7:
-                # Strong edge - consider ML
-                if g['spread_edge'] > 0:
-                    ml_pick = f"{g['home_team']} ML ({g['ml_home']:+d})"
-                else:
-                    ml_pick = f"{g['away_team']} ML ({g['ml_away']:+d})"
+        # Add ML info - ONLY for home team plays with 7+ edge
+        if g.get('ml_home') and g.get('spread_edge', 0) >= 7:
+            # Only home team ML (away team picks are losing strategy)
+            ml_pick = f"{g['home_team']} ML ({g['ml_home']:+d})"
             if ml_pick:
                 rows.append({
                     'date': target_date,
