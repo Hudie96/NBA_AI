@@ -32,7 +32,7 @@ def get_missing_games(conn, days_back=30):
         LEFT JOIN PlayerBox pb ON g.game_id = pb.game_id
         WHERE DATE(g.date_time_utc) >= ?
           AND DATE(g.date_time_utc) < DATE('now')
-          AND g.status = '3'
+          AND (g.status = '3' OR g.status = 'Final')
           AND pb.game_id IS NULL
         ORDER BY g.date_time_utc
     ''', (cutoff_date,))
