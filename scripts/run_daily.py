@@ -14,11 +14,99 @@ Usage:
 import argparse
 import subprocess
 import sys
+import sqlite3
+import requests
 from datetime import date
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.config import config
+
+DB_PATH = config["database"]["path"]
+
+# ESPN to standard abbreviation mapping
+ESPN_TO_STD = {
+    'UTAH': 'UTA', 'WSH': 'WAS', 'SA': 'SAS', 'NY': 'NYK',
+    'GS': 'GSW', 'NO': 'NOP', 'PHO': 'PHX', 'PHOE': 'PHX'
+}
+
+
+def fetch_betting_lines(target_date: str):
+    """Fetch betting lines from ESPN for target date."""
+    print(f"\n{'='*60}")
+    print(f"  Fetching betting lines for {target_date}")
+    print(f"{'='*60}\n")
+
+    conn = sqlite3.connect(DB_PATH)
+    date_fmt = target_date.replace('-', '')
+
+    try:
+        url = f'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_fmt}'
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        events = data.get('events', [])
+
+        saved = 0
+        for event in events:
+            competition = event.get('competitions', [{}])[0]
+            competitors = competition.get('competitors', [])
+            home = next((c for c in competitors if c.get('homeAway') == 'home'), {})
+            away = next((c for c in competitors if c.get('homeAway') == 'away'), {})
+
+            home_abbrev = ESPN_TO_STD.get(home.get('team', {}).get('abbreviation', ''),
+                                          home.get('team', {}).get('abbreviation', ''))
+            away_abbrev = ESPN_TO_STD.get(away.get('team', {}).get('abbreviation', ''),
+                                          away.get('team', {}).get('abbreviation', ''))
+
+            game = conn.execute('''
+                SELECT game_id FROM Games
+                WHERE home_team = ? AND away_team = ? AND date(date_time_utc) = ?
+            ''', (home_abbrev, away_abbrev, target_date)).fetchone()
+
+            if not game:
+                continue
+
+            game_id = game[0]
+            odds = competition.get('odds', [{}])
+            if not odds:
+                continue
+
+            odds_data = odds[0]
+            spread = odds_data.get('spread')
+            total = odds_data.get('overUnder')
+            home_ml = odds_data.get('homeTeamOdds', {}).get('moneyLine')
+            away_ml = odds_data.get('awayTeamOdds', {}).get('moneyLine')
+
+            exists = conn.execute('SELECT 1 FROM Betting WHERE game_id = ?', (game_id,)).fetchone()
+
+            if exists:
+                conn.execute('''
+                    UPDATE Betting
+                    SET espn_current_spread = ?, espn_current_total = ?,
+                        espn_current_ml_home = ?, espn_current_ml_away = ?,
+                        updated_at = datetime('now')
+                    WHERE game_id = ?
+                ''', (spread, total, home_ml, away_ml, game_id))
+            else:
+                conn.execute('''
+                    INSERT INTO Betting
+                    (game_id, espn_current_spread, espn_current_total, espn_current_ml_home, espn_current_ml_away, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ''', (game_id, spread, total, home_ml, away_ml))
+
+            print(f"  {away_abbrev} @ {home_abbrev}: spread={spread}, total={total}")
+            saved += 1
+
+        conn.commit()
+        print(f"\n  Saved {saved} betting lines")
+
+    except Exception as e:
+        print(f"  [WARN] Failed to fetch betting lines: {e}")
+    finally:
+        conn.close()
 
 
 def run_script(name: str, args: list = None, required: bool = True) -> bool:
@@ -85,6 +173,10 @@ def main():
         if not run_script("update_boxscores.py", [], required=False):
             print("[WARN] Boxscore update had issues")
 
+    # Step 1c: Fetch betting lines from ESPN
+    if not args.predictions:
+        fetch_betting_lines(target_date)
+
     # Step 2: Generate Spread Predictions
     if not args.props_only:
         pred_args = ["--date", target_date]
@@ -139,13 +231,15 @@ def main():
     print("="*60)
     print("""
   SPREADS (Tier System):
-    - PLATINUM: 84.4% win rate (GREEN + Edge >= +7)
-    - GOLD: 78.9% win rate (GREEN + Edge >= +5)
-    - SILVER: 74.4% win rate (Edge >= +5)
+    - PLATINUM: Model edge >= +7 pts vs Vegas
+    - GOLD: Model edge >= +5 pts vs Vegas
+    - SILVER: Model edge >= +3 pts vs Vegas
 
-  PROPS (S_TIER):
-    - High confidence player props
-    - Based on L10, season avg, vs opponent history
+  PROPS (Star Players Only):
+    - PLATINUM: Edge >= 25%
+    - GOLD: Edge >= 20%
+    - SILVER: Edge >= 15%
+    - Based on L10 avg, season avg, vs opponent history
 """)
 
     print("Next steps:")
