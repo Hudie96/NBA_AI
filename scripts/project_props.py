@@ -43,22 +43,23 @@ STATS_EXTENDED = [
     "FPT",                            # Fantasy points
 ]
 
-# Column mapping for stats
+# Column mapping for stats (maps to PlayerBox columns)
 STAT_COLS = {
-    "PTS": "points",
-    "REB": "rebounds",
-    "AST": "assists",
-    "3PM": "threes_made",
-    "STL": "steals",
-    "BLK": "blocks",
-    "TOV": "turnovers",
-    "OREB": "offensive_rebounds",
-    "DREB": "defensive_rebounds",
-    "PRA": "pts_reb_ast",
-    "PR": "pts_reb",
-    "PA": "pts_ast",
-    "RA": "reb_ast",
-    "FPT": "fantasy_points",
+    "PTS": "pts",
+    "REB": "reb",
+    "AST": "ast",
+    "3PM": "fg3m",
+    "STL": "stl",
+    "BLK": "blk",
+    "TOV": "tov",
+    "OREB": "oreb",
+    "DREB": "dreb",
+    # Combo stats - calculated expressions
+    "PRA": "(pb.pts + pb.reb + pb.ast)",
+    "PR": "(pb.pts + pb.reb)",
+    "PA": "(pb.pts + pb.ast)",
+    "RA": "(pb.reb + pb.ast)",
+    "FPT": "(pb.pts + pb.reb * 1.2 + pb.ast * 1.5 + pb.stl * 3 + pb.blk * 3 - pb.tov)",
 }
 
 
@@ -80,14 +81,22 @@ def get_player_position(player_name, conn):
 
 
 def get_last_n_games_avg(player_name, stat, conn, n=10):
-    """Get player's average over last N games."""
+    """Get player's average over last N games using PlayerBox."""
     col = STAT_COLS.get(stat, stat.lower())
 
+    # For combo stats, use full expression; for simple stats, prefix with pb.
+    if stat in ["PRA", "PR", "PA", "RA", "FPT"]:
+        select_expr = col
+    else:
+        select_expr = f"pb.{col}"
+
     df = pd.read_sql(f"""
-        SELECT {col} as val
-        FROM player_game_logs
-        WHERE player_name = ?
-        ORDER BY game_date DESC
+        SELECT {select_expr} as val
+        FROM PlayerBox pb
+        JOIN Games g ON pb.game_id = g.game_id
+        WHERE pb.player_name = ?
+          AND pb.min > 0
+        ORDER BY g.date_time_utc DESC
         LIMIT ?
     """, conn, params=(player_name, n))
 
@@ -97,13 +106,20 @@ def get_last_n_games_avg(player_name, stat, conn, n=10):
 
 
 def get_season_avg(player_name, stat, conn):
-    """Get player's season average."""
+    """Get player's season average using PlayerBox."""
     col = STAT_COLS.get(stat, stat.lower())
 
+    # For combo stats, use full expression; for simple stats, prefix with pb.
+    if stat in ["PRA", "PR", "PA", "RA", "FPT"]:
+        select_expr = col
+    else:
+        select_expr = f"pb.{col}"
+
     df = pd.read_sql(f"""
-        SELECT AVG({col}) as val
-        FROM player_game_logs
-        WHERE player_name = ?
+        SELECT AVG({select_expr}) as val
+        FROM PlayerBox pb
+        WHERE pb.player_name = ?
+          AND pb.min > 0
     """, conn, params=(player_name,))
 
     if df.empty or df.iloc[0]["val"] is None:
@@ -260,10 +276,11 @@ def get_top_usage_players(conn, limit=50):
     """Get top players by total minutes played (proxy for usage)."""
     df = pd.read_sql(f"""
         SELECT player_name,
-               SUM(minutes) as total_min,
+               SUM(min) as total_min,
                COUNT(*) as games,
-               AVG(points) as avg_pts
-        FROM player_game_logs
+               AVG(pts) as avg_pts
+        FROM PlayerBox
+        WHERE min > 0
         GROUP BY player_name
         HAVING games >= 20
         ORDER BY total_min DESC
@@ -333,7 +350,7 @@ def build_player_positions_table(conn):
 
 def backtest_projections(conn, num_players=50, num_games=10):
     """
-    Backtest projections against actual results.
+    Backtest projections against actual results using PlayerBox.
 
     For each player's last N games:
     - Use only data available BEFORE that game to project
@@ -347,17 +364,31 @@ def backtest_projections(conn, num_players=50, num_games=10):
     # Get top usage players
     top_players = get_top_usage_players(conn, limit=num_players)
 
+    # Column mapping for backtest (simple stat names for dataframe)
+    BACKTEST_COLS = {
+        "PTS": "pts", "REB": "reb", "AST": "ast", "3PM": "fg3m",
+        "PRA": "pra", "PR": "pr", "PA": "pa", "RA": "ra"
+    }
+
     results = []
 
     for _, player_row in top_players.iterrows():
         player_name = player_row["player_name"]
 
-        # Get player's recent games
+        # Get player's recent games from PlayerBox
         games = pd.read_sql("""
-            SELECT game_date, opponent, points, rebounds, assists, threes_made
-            FROM player_game_logs
-            WHERE player_name = ?
-            ORDER BY game_date DESC
+            SELECT DATE(g.date_time_utc) as game_date,
+                   g.away_team as opponent,
+                   pb.pts, pb.reb, pb.ast, pb.fg3m,
+                   (pb.pts + pb.reb + pb.ast) as pra,
+                   (pb.pts + pb.reb) as pr,
+                   (pb.pts + pb.ast) as pa,
+                   (pb.reb + pb.ast) as ra
+            FROM PlayerBox pb
+            JOIN Games g ON pb.game_id = g.game_id
+            WHERE pb.player_name = ?
+              AND pb.min > 0
+            ORDER BY g.date_time_utc DESC
             LIMIT ?
         """, conn, params=(player_name, num_games + 10))  # Get extra for history
 
@@ -383,39 +414,22 @@ def backtest_projections(conn, num_players=50, num_games=10):
                 continue
 
             for stat in STATS:
-                col = STAT_COLS[stat]
+                col = BACKTEST_COLS[stat]
                 actual = game[col]
 
                 # Calculate projection components from prior data
                 last_10_avg = prior_games[col].mean()
                 season_avg = games.iloc[i+1:][col].mean()  # All prior games
 
-                # Get vs opponent avg (simplified - use all historical)
-                vs_opp_df = pd.read_sql("""
-                    SELECT AVG(""" + col + """) as avg_val
-                    FROM player_game_logs
-                    WHERE player_name = ? AND opponent = ? AND game_date < ?
-                """, conn, params=(player_name, opponent, game_date))
-
-                vs_opp = vs_opp_df.iloc[0]["avg_val"] if not vs_opp_df.empty and vs_opp_df.iloc[0]["avg_val"] else None
-
                 # DVP adjustment (static for simplicity)
                 dvp_adj = get_dvp_adjustment(opponent, pos, stat, conn)
 
-                # Calculate projection
-                if vs_opp is not None:
-                    projection = (
-                        last_10_avg * 0.40 +
-                        season_avg * 0.30 +
-                        vs_opp * 0.20 +
-                        (season_avg + dvp_adj) * 0.10
-                    )
-                else:
-                    projection = (
-                        last_10_avg * 0.50 +
-                        season_avg * 0.40 +
-                        (season_avg + dvp_adj) * 0.10
-                    )
+                # Calculate projection (simplified - no vs_opp for speed)
+                projection = (
+                    last_10_avg * 0.50 +
+                    season_avg * 0.40 +
+                    (season_avg + dvp_adj) * 0.10
+                )
 
                 # Calculate error
                 if actual > 0:

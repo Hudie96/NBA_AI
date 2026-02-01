@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--date", type=str, default=None, help="Target date (YYYY-MM-DD)")
     parser.add_argument("--skip-verify", action="store_true", help="Skip AI verification step")
     parser.add_argument("--skip-output", action="store_true", help="Skip output generation")
+    parser.add_argument("--skip-data-check", action="store_true", help="Skip data verification step")
     args = parser.parse_args()
 
     target_date = args.date or date.today().isoformat()
@@ -66,6 +67,12 @@ def main():
         bet_types.append("PROPS")
     print(f"  Bet Types: {', '.join(bet_types)}")
     print("="*60)
+
+    # Step 0: Data Verification (default, skip with --skip-data-check)
+    if not args.skip_data_check:
+        verify_args = ["--date", target_date]
+        if not run_script("verify_data.py", verify_args, required=False):
+            print("[WARN] Data verification found issues - review above")
 
     # Step 1: Data Refresh
     if not args.predictions:
