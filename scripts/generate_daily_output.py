@@ -270,16 +270,163 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
     if rows:
         fieldnames = ['date', 'game', 'bet_type', 'player', 'pick', 'line', 'projection',
                       'edge', 'l10_avg', 'season_avg', 'tier', 'confidence']
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+        try:
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        except PermissionError:
+            # Try alternate filename
+            filepath = PREDICTIONS_DIR / f"picks_{target_date}_{datetime.now().strftime('%H%M%S')}.csv"
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
 
     return filepath, rows
 
 
+def get_engagement_stats(conn, target_date, prop_picks):
+    """Generate unique statistical insights for engagement posts."""
+    stats_posts = []
+
+    for p in prop_picks[:10]:
+        player_name = p['player_name']
+        opponent = p['opponent']
+        stat = p.get('stat', p.get('prop_type', ''))
+        team = p.get('team', '')
+
+        # Get opponent's pace ranking
+        opp_pace = conn.execute('''
+            SELECT pace,
+                   (SELECT COUNT(*) + 1 FROM TeamAdvancedStats t2 WHERE t2.pace > t1.pace) as pace_rank
+            FROM TeamAdvancedStats t1
+            WHERE team_abbrev = ?
+            ORDER BY updated_at DESC LIMIT 1
+        ''', (opponent,)).fetchone()
+
+        # Get opponent's defensive rating ranking
+        opp_def = conn.execute('''
+            SELECT def_rating,
+                   (SELECT COUNT(*) + 1 FROM TeamAdvancedStats t2 WHERE t2.def_rating < t1.def_rating) as def_rank
+            FROM TeamAdvancedStats t1
+            WHERE team_abbrev = ?
+            ORDER BY updated_at DESC LIMIT 1
+        ''', (opponent,)).fetchone()
+
+        if opp_pace:
+            pace_rank = opp_pace[1]
+            if pace_rank <= 5:
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"Matchup Alert",
+                    'stat': f"{opponent} has #{pace_rank} fastest pace in NBA",
+                    'opponent': opponent,
+                    'matchup_note': f"More possessions = more opportunities"
+                })
+            elif pace_rank >= 26:
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"Pace Warning",
+                    'stat': f"{opponent} has #{pace_rank} slowest pace in NBA",
+                    'opponent': opponent,
+                    'matchup_note': f"Fewer possessions tonight"
+                })
+
+        if opp_def:
+            def_rank = opp_def[1]
+            if def_rank >= 25:
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"Soft Defense Matchup",
+                    'stat': f"{opponent} ranks #{def_rank} in defensive rating",
+                    'opponent': opponent,
+                    'matchup_note': f"Expect inflated stats tonight"
+                })
+
+        # Get player's hot/cold streak
+        recent_games = conn.execute('''
+            SELECT pb.pts, pb.reb, pb.ast, g.date_time_utc
+            FROM PlayerBox pb
+            JOIN Games g ON pb.game_id = g.game_id
+            WHERE pb.player_name = ?
+            ORDER BY g.date_time_utc DESC
+            LIMIT 10
+        ''', (player_name,)).fetchall()
+
+        if len(recent_games) >= 5:
+            last_5_pra = [g[0] + g[1] + g[2] for g in recent_games[:5]]
+            prev_5_pra = [g[0] + g[1] + g[2] for g in recent_games[5:10]] if len(recent_games) >= 10 else []
+
+            avg_last_5 = sum(last_5_pra) / len(last_5_pra)
+            avg_prev_5 = sum(prev_5_pra) / len(prev_5_pra) if prev_5_pra else 0
+
+            # Check for streak
+            line = p.get('line', 0)
+            overs_l5 = sum(1 for pra in last_5_pra if pra > line)
+            if overs_l5 >= 4:
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"Hot Streak Alert",
+                    'stat': f"{overs_l5}/5 OVER {line} {stat} in last 5 games",
+                    'opponent': opponent,
+                    'matchup_note': f"L5 avg: {avg_last_5:.1f}"
+                })
+            elif overs_l5 <= 1:
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"Cold Streak Alert",
+                    'stat': f"Only {overs_l5}/5 OVER {line} {stat} in last 5",
+                    'opponent': opponent,
+                    'matchup_note': f"L5 avg: {avg_last_5:.1f}"
+                })
+
+            # Check for trend change
+            if avg_prev_5 > 0:
+                change_pct = ((avg_last_5 - avg_prev_5) / avg_prev_5) * 100
+                if abs(change_pct) >= 25:
+                    trend = "UP" if change_pct > 0 else "DOWN"
+                    emoji = "trending up" if trend == "UP" else "trending down"
+                    stats_posts.append({
+                        'player': player_name,
+                        'insight': f"Usage Trend",
+                        'stat': f"PRA {trend} {abs(change_pct):.0f}% over last 5 games",
+                        'opponent': opponent,
+                        'matchup_note': f"{avg_last_5:.1f} vs {avg_prev_5:.1f} prior"
+                    })
+
+        # Get player's vs opponent history
+        vs_opp = conn.execute('''
+            SELECT pb.pts, pb.reb, pb.ast
+            FROM PlayerBox pb
+            JOIN Games g ON pb.game_id = g.game_id
+            JOIN Teams t ON pb.team_id = t.team_id
+            WHERE pb.player_name = ?
+            AND (g.home_team = ? OR g.away_team = ?)
+            AND t.abbreviation != ?
+        ''', (player_name, opponent, opponent, opponent)).fetchall()
+
+        if len(vs_opp) >= 3:
+            avg_vs_opp = sum(g[0] + g[1] + g[2] for g in vs_opp) / len(vs_opp)
+            line = p.get('line', 0)
+            overs_vs_opp = sum(1 for g in vs_opp if g[0] + g[1] + g[2] > line)
+            hit_rate = (overs_vs_opp / len(vs_opp)) * 100
+
+            if hit_rate >= 75 or hit_rate <= 25:
+                direction = "OVER" if hit_rate >= 75 else "UNDER"
+                stats_posts.append({
+                    'player': player_name,
+                    'insight': f"vs {opponent} History",
+                    'stat': f"{int(hit_rate)}% {direction} rate in {len(vs_opp)} career matchups",
+                    'opponent': opponent,
+                    'matchup_note': f"Avg: {avg_vs_opp:.1f} PRA vs {opponent}"
+                })
+
+    return stats_posts[:8]  # Return top 8 insights
+
+
 def generate_social_posts(conn, target_date, prop_picks, spread_picks):
-    """Generate social media content."""
+    """Generate social media content - SILVER tier free, premium elsewhere."""
     filepath = SOCIAL_DIR / f"posts_{target_date}.txt"
 
     games = get_todays_games(conn, target_date)
@@ -287,71 +434,133 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     content = []
 
     # Header
-    content.append(f"AXIOM PICKS - {target_date}")
-    content.append("=" * 50)
+    content.append(f"AXIOM SOCIAL CONTENT - {target_date}")
+    content.append("=" * 60)
     content.append("")
 
-    # Games today
-    content.append(f"GAMES TODAY: {len(games)}")
-    for g in games:
-        content.append(f"  {g['away_team']} @ {g['home_team']}")
+    # =========================================================
+    # SECTION 1: FREE PICKS (SILVER TIER ONLY)
+    # =========================================================
+    content.append("=" * 60)
+    content.append("FREE PICKS (SILVER TIER) - Post These")
+    content.append("=" * 60)
     content.append("")
 
-    # === SPREAD PICKS ===
-    spread_with_edge = [g for g in spread_picks if g.get('spread_pick')]
-    if spread_with_edge:
-        content.append("-" * 50)
-        content.append("SPREAD PICKS")
-        content.append("-" * 50)
-        for g in spread_with_edge:
-            tier = g.get('spread_tier', '')
-            content.append(f"[{tier}] {g['spread_pick']} (edge: {g['spread_edge']:+.1f})")
-        content.append("")
+    # Filter to SILVER tier spreads only
+    silver_spreads = [g for g in spread_picks if g.get('spread_tier') == 'SILVER']
 
-    # === TWITTER POST - SPREADS ===
-    if spread_with_edge:
+    if silver_spreads:
         content.append("-" * 50)
-        content.append("TWITTER POST - SPREADS")
+        content.append("TWITTER - FREE SPREAD PICK")
         content.append("-" * 50)
         content.append("")
 
-        tweet = f"AXIOM Spreads {target_date[-5:]}\n\n"
-        for g in spread_with_edge[:3]:
-            tweet += f"{g['spread_pick']} ({g['spread_edge']:+.1f})\n"
-        tweet += f"\n#NBA #NBABets #GamblingTwitter"
+        for g in silver_spreads[:2]:
+            tweet = f"Free pick of the day\n\n"
+            tweet += f"{g['spread_pick']}\n\n"
+            tweet += f"Model edge: {g['spread_edge']:+.1f} pts\n"
+            tweet += f"Our model vs Vegas\n\n"
+            tweet += f"Like + RT for more free picks\n"
+            tweet += f"#NBA #FreePicks #NBABets"
+            content.append(tweet)
+            content.append("")
+
+    # =========================================================
+    # SECTION 2: ENGAGEMENT POSTS (STATISTICAL INSIGHTS)
+    # =========================================================
+    content.append("=" * 60)
+    content.append("ENGAGEMENT POSTS - Unique Stats That Get Clicks")
+    content.append("=" * 60)
+    content.append("")
+
+    # Generate engagement stats
+    engagement_stats = get_engagement_stats(conn, target_date, prop_picks)
+
+    for i, stat in enumerate(engagement_stats, 1):
+        content.append("-" * 50)
+        content.append(f"STAT POST #{i}")
+        content.append("-" * 50)
+        content.append("")
+
+        tweet = f"{stat['player']} {stat['insight']}\n\n"
+        tweet += f"{stat['stat']}\n\n"
+        tweet += f"Tonight: vs {stat['opponent']}\n"
+        tweet += f"{stat['matchup_note']}\n\n"
+        tweet += f"#NBA #NBAStats #PlayerProps"
         content.append(tweet)
         content.append("")
 
-    # === TWITTER POST - TOP PROPS ===
-    content.append("-" * 50)
-    content.append("TWITTER POST - TOP PROPS")
-    content.append("-" * 50)
+    # =========================================================
+    # SECTION 3: MATCHUP INSIGHTS
+    # =========================================================
+    content.append("=" * 60)
+    content.append("MATCHUP INSIGHT POSTS")
+    content.append("=" * 60)
     content.append("")
 
-    tweet = f"AXIOM Props {target_date[-5:]}\n\n"
-    for p in prop_picks[:5]:
-        direction = 'O' if p['edge'] > 0 else 'U'
-        tweet += f"{p['player_name']} {direction}{p['line']} {p['stat']} ({p['edge_pct']:+.0f}%)\n"
-    tweet += f"\nS-TIER combos | L10 trending\n#NBA #NBABets #PlayerProps"
-    content.append(tweet)
+    for g in games[:3]:
+        away = g['away_team']
+        home = g['home_team']
+
+        # Get team stats for comparison
+        home_stats = conn.execute('''
+            SELECT pace, off_rating, def_rating
+            FROM TeamAdvancedStats WHERE team_abbrev = ?
+            ORDER BY updated_at DESC LIMIT 1
+        ''', (home,)).fetchone()
+
+        away_stats = conn.execute('''
+            SELECT pace, off_rating, def_rating
+            FROM TeamAdvancedStats WHERE team_abbrev = ?
+            ORDER BY updated_at DESC LIMIT 1
+        ''', (away,)).fetchone()
+
+        if home_stats and away_stats:
+            pace_diff = abs(home_stats[0] - away_stats[0])
+            combined_off = home_stats[1] + away_stats[1]
+
+            content.append("-" * 50)
+            content.append(f"MATCHUP: {away} @ {home}")
+            content.append("-" * 50)
+            content.append("")
+
+            if pace_diff > 3:
+                fast_team = home if home_stats[0] > away_stats[0] else away
+                slow_team = away if fast_team == home else home
+                tweet = f"{away} @ {home} Pace Mismatch\n\n"
+                tweet += f"{fast_team}: {home_stats[0] if fast_team == home else away_stats[0]:.1f} pace\n"
+                tweet += f"{slow_team}: {away_stats[0] if fast_team == home else home_stats[0]:.1f} pace\n\n"
+                tweet += f"Pace gap: {pace_diff:.1f}\n"
+                tweet += f"Expect: {'Faster' if fast_team == home else 'Slower'} game at home\n\n"
+                tweet += f"#NBA #{home} #{away}"
+                content.append(tweet)
+                content.append("")
+
+    # =========================================================
+    # SECTION 4: PREMIUM PICKS TEASER (Don't give full pick)
+    # =========================================================
+    content.append("=" * 60)
+    content.append("PREMIUM TEASER POSTS - Drive to Paid")
+    content.append("=" * 60)
     content.append("")
 
-    # === INDIVIDUAL PLAYER POSTS ===
-    content.append("-" * 50)
-    content.append("TWITTER POSTS - TOP 3 PROPS")
-    content.append("-" * 50)
-
-    for p in prop_picks[:3]:
+    gold_platinum = [g for g in spread_picks if g.get('spread_tier') in ['GOLD', 'PLATINUM']]
+    if gold_platinum:
+        content.append("-" * 50)
+        content.append("PREMIUM TEASER")
+        content.append("-" * 50)
         content.append("")
-        direction = 'OVER' if p['edge'] > 0 else 'UNDER'
-        team = p.get('team', '?')
-        player_tweet = f"{p['player_name']} {direction} {p['line']} {p['stat']}\n\n"
-        player_tweet += f"L10: {p['l10_avg']:.1f}\n"
-        player_tweet += f"Season: {p['season_avg']:.1f}\n"
-        player_tweet += f"Projection: {p['projection']:.1f}\n"
-        player_tweet += f"Edge: {p['edge_pct']:+.1f}%\n\n"
-        player_tweet += f"{team} vs {p['opponent']} | S-TIER\n#NBA #PlayerProps"
-        content.append(player_tweet)
+
+        tweet = f"Today's GOLD/PLATINUM picks\n\n"
+        for g in gold_platinum[:2]:
+            # Don't reveal the actual pick, just tease
+            game = g['game']
+            tweet += f"{game} - {g.get('spread_tier')} rated\n"
+        tweet += f"\nModel edge: {abs(gold_platinum[0].get('spread_edge', 0)):.1f}+ pts\n\n"
+        tweet += f"Get picks: [link]\n"
+        tweet += f"#NBA #NBABets #PremiumPicks"
+        content.append(tweet)
+        content.append("")
 
     # Write file
     with open(filepath, 'w', encoding='utf-8') as f:
