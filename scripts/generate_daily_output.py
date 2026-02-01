@@ -180,16 +180,23 @@ def get_model_prediction(conn, away_team, home_team):
 def get_prop_picks(conn, target_date, min_games=20):
     """Get HIGH confidence prop picks with PLATINUM/GOLD/SILVER tiers.
 
+    Only includes STAR players (25+ min avg) - no bench players.
+
     Tier thresholds:
     - PLATINUM: Edge >= 25%
     - GOLD: Edge >= 20%
     - SILVER: Edge >= 15%
     """
+    # Get star players first
+    star_players = get_star_players(conn)
+
     edges = find_edges_for_today(conn, target_date, min_games=min_games)
 
-    # Filter to HIGH confidence with edge >= 15% (SILVER or better)
+    # Filter to HIGH confidence, 15%+ edge, STAR PLAYERS ONLY
     high_conf = [e for e in edges
-                 if e.get('confidence') == 'HIGH' and abs(e.get('edge_pct', 0)) >= 15]
+                 if e.get('confidence') == 'HIGH'
+                 and abs(e.get('edge_pct', 0)) >= 15
+                 and e.get('player_name') in star_players]
 
     # Parse factors JSON and add to edge dict
     for e in high_conf:
