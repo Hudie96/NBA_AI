@@ -178,23 +178,39 @@ def get_model_prediction(conn, away_team, home_team):
 
 
 def get_prop_picks(conn, target_date, min_games=20):
-    """Get S_TIER HIGH confidence prop picks."""
+    """Get HIGH confidence prop picks with PLATINUM/GOLD/SILVER tiers.
+
+    Tier thresholds:
+    - PLATINUM: Edge >= 25%
+    - GOLD: Edge >= 20%
+    - SILVER: Edge >= 15%
+    """
     edges = find_edges_for_today(conn, target_date, min_games=min_games)
 
-    # Filter to S_TIER HIGH only
-    high_s_tier = [e for e in edges if e.get('stat_tier') == 'S_TIER' and e.get('confidence') == 'HIGH']
+    # Filter to HIGH confidence with edge >= 15% (SILVER or better)
+    high_conf = [e for e in edges
+                 if e.get('confidence') == 'HIGH' and abs(e.get('edge_pct', 0)) >= 15]
 
     # Parse factors JSON and add to edge dict
-    for e in high_s_tier:
+    for e in high_conf:
         factors = json.loads(e.get('factors', '{}'))
         e['l10_avg'] = factors.get('last_10_avg', 0) or 0
         e['season_avg'] = factors.get('season_avg', 0) or 0
         e['vs_opp_avg'] = factors.get('vs_opp_avg', 0) or 0
         e['stat'] = e.get('prop_type', '')
 
+        # Assign tier based on edge
+        edge_abs = abs(e['edge_pct'])
+        if edge_abs >= 25:
+            e['prop_tier'] = 'PLATINUM'
+        elif edge_abs >= 20:
+            e['prop_tier'] = 'GOLD'
+        else:
+            e['prop_tier'] = 'SILVER'
+
     # Group by player, keep best edge per player
     by_player = {}
-    for e in high_s_tier:
+    for e in high_conf:
         player = e['player_name']
         if player not in by_player or abs(e['edge_pct']) > abs(by_player[player]['edge_pct']):
             by_player[player] = e
@@ -269,10 +285,22 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                     'confidence': 'HIGH',
                 })
 
-    # Add prop picks
+    # Add prop picks with PLATINUM/GOLD/SILVER tiers based on edge
     for p in prop_picks:
         direction = 'OVER' if p['edge'] > 0 else 'UNDER'
         team = p.get('team', '?')
+        edge_abs = abs(p['edge_pct'])
+
+        # Prop tier based on edge percentage
+        if edge_abs >= 25:
+            prop_tier = 'PLATINUM'
+        elif edge_abs >= 20:
+            prop_tier = 'GOLD'
+        elif edge_abs >= 15:
+            prop_tier = 'SILVER'
+        else:
+            prop_tier = 'BRONZE'
+
         rows.append({
             'date': target_date,
             'game': f"{team} vs {p['opponent']}",
@@ -284,7 +312,7 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
             'edge': f"{p['edge_pct']:+.1f}%",
             'l10_avg': round(p['l10_avg'], 1),
             'season_avg': round(p['season_avg'], 1),
-            'tier': 'S_TIER',
+            'tier': prop_tier,
             'confidence': p['confidence'],
         })
 
@@ -508,6 +536,29 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
             content.append(tweet)
             content.append("")
 
+    # Filter to SILVER tier props (star players only) - 15-20% edge
+    silver_props = [p for p in prop_picks
+                    if p['player_name'] in star_players
+                    and 15 <= abs(p['edge_pct']) < 20]
+
+    if silver_props:
+        content.append("-" * 50)
+        content.append("TWITTER - FREE PROP PICK")
+        content.append("-" * 50)
+        content.append("")
+
+        for p in silver_props[:2]:
+            direction = 'OVER' if p['edge_pct'] > 0 else 'UNDER'
+            tweet = f"Free prop pick\n\n"
+            tweet += f"{p['player_name']}\n"
+            tweet += f"{direction} {p['line']} {p['stat']}\n\n"
+            tweet += f"L10 avg: {p['l10_avg']:.1f} | Line: {p['line']}\n"
+            tweet += f"Edge: {abs(p['edge_pct']):.0f}%\n\n"
+            tweet += f"Like + RT for more free picks\n"
+            tweet += f"#NBA #PlayerProps #NBABets"
+            content.append(tweet)
+            content.append("")
+
     # =========================================================
     # SECTION 2: ENGAGEMENT POSTS (STATISTICAL INSIGHTS)
     # =========================================================
@@ -605,18 +656,19 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
         content.append(tweet)
         content.append("")
 
-    # Premium star player props teaser
-    star_props = [p for p in prop_picks if p['player_name'] in star_players][:5]
+    # Premium star player props teaser (GOLD/PLATINUM only)
+    star_props = [p for p in prop_picks if p['player_name'] in star_players and abs(p['edge_pct']) >= 20][:5]
     if star_props:
         content.append("-" * 50)
         content.append("PREMIUM PROPS TEASER (Star Players)")
         content.append("-" * 50)
         content.append("")
 
-        tweet = f"Today's S_TIER player props\n\n"
+        tweet = f"Today's GOLD/PLATINUM player props\n\n"
         for p in star_props[:3]:
             # Tease the player, not the full pick
-            tweet += f"{p['player_name']} - Edge: {abs(p['edge_pct']):.0f}%\n"
+            tier = 'PLATINUM' if abs(p['edge_pct']) >= 25 else 'GOLD'
+            tweet += f"{p['player_name']} ({tier}) - Edge: {abs(p['edge_pct']):.0f}%\n"
         tweet += f"\nOur model vs Vegas lines\n"
         tweet += f"Get full picks: [link]\n\n"
         tweet += f"#NBA #PlayerProps #NBABets"
@@ -731,7 +783,10 @@ def main():
 
     print("[2/4] Getting prop picks...")
     prop_picks = get_prop_picks(conn, target_date)
-    print(f"      S_TIER HIGH props: {len(prop_picks)}")
+    plat_count = len([p for p in prop_picks if p.get('prop_tier') == 'PLATINUM'])
+    gold_count = len([p for p in prop_picks if p.get('prop_tier') == 'GOLD'])
+    silver_count = len([p for p in prop_picks if p.get('prop_tier') == 'SILVER'])
+    print(f"      Props: {len(prop_picks)} total (PLATINUM: {plat_count}, GOLD: {gold_count}, SILVER: {silver_count})")
     print()
 
     # Generate predictions spreadsheet
