@@ -41,6 +41,23 @@ RESULTS_CSV = PROJECT_ROOT / 'data' / 'results.csv'
 PREDICTIONS_DIR = PROJECT_ROOT / 'outputs' / 'predictions'
 PERFORMANCE_DIR = PROJECT_ROOT / 'outputs' / 'performance'
 
+# Human-readable stat names for Discord embeds
+STAT_DISPLAY = {
+    'PRA': 'Pts+Reb+Ast', 'PA': 'Pts+Ast', 'RA': 'Reb+Ast',
+    'PR': 'Pts+Reb', 'PTS': 'Points', 'REB': 'Rebounds',
+    'AST': 'Assists', '3PM': '3-Pointers',
+    # Also handle expanded names (already expanded from picks CSV)
+    'Pts+Reb+Ast': 'Pts+Reb+Ast', 'Pts+Ast': 'Pts+Ast',
+    'Reb+Ast': 'Reb+Ast', 'Pts+Reb': 'Pts+Reb',
+    'Points': 'Points', 'Rebounds': 'Rebounds',
+    'Assists': 'Assists', '3-Pointers': '3-Pointers',
+}
+
+
+def expand_stat(stat):
+    """Convert stat abbreviation to human-readable name."""
+    return STAT_DISPLAY.get(stat, stat)
+
 # Tier colors for embeds
 TIER_COLORS = {
     'PLATINUM': 0x7B68EE,
@@ -100,9 +117,15 @@ def _build_spread_field(row):
 
 def _build_prop_field(row):
     """Build embed field for a prop pick."""
+    pick_text = row['pick']
+    # Expand stat abbreviation in pick text (e.g. "OVER 14.2 PA" -> "OVER 14.2 Pts+Ast")
+    parts = pick_text.rsplit(' ', 1)
+    if len(parts) == 2:
+        pick_text = f"{parts[0]} {expand_stat(parts[1])}"
+
     return {
         "name": f"PROP | {row.get('player', row.get('pick', ''))}",
-        "value": f"**{row['pick']}**\nL10: {row.get('l10_avg', '')} | Edge: {row.get('edge', '')}",
+        "value": f"**{pick_text}**\nL10: {row.get('l10_avg', '')} | Edge: {row.get('edge', '')}",
         "inline": False
     }
 

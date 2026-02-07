@@ -36,6 +36,57 @@ for d in [PREDICTIONS_DIR, SOCIAL_DIR, PERFORMANCE_DIR]:
 # Minimum average minutes to be considered a "star" for social content
 MIN_STAR_MINUTES = 25
 
+# Human-readable stat names for output (social posts, Discord, web)
+STAT_DISPLAY = {
+    'PRA': 'Pts+Reb+Ast', 'PA': 'Pts+Ast', 'RA': 'Reb+Ast',
+    'PR': 'Pts+Reb', 'PTS': 'Points', 'REB': 'Rebounds',
+    'AST': 'Assists', '3PM': '3-Pointers',
+}
+
+
+def expand_stat(stat):
+    """Convert stat abbreviation to human-readable name."""
+    return STAT_DISPLAY.get(stat, stat)
+
+
+def get_game_times(conn, target_date):
+    """Get game times for a date, converted to ET.
+
+    Returns dict of 'AWAY @ HOME' -> 'H:MM PM ET'
+    """
+    from datetime import timedelta as td
+
+    rows = conn.execute('''
+        SELECT away_team, home_team, date_time_utc
+        FROM Games
+        WHERE DATE(date_time_utc) = ?
+        ORDER BY date_time_utc
+    ''', (target_date,)).fetchall()
+
+    game_times = {}
+    for away, home, utc_str in rows:
+        if not utc_str:
+            continue
+        try:
+            utc_dt = datetime.fromisoformat(utc_str.replace('Z', '+00:00'))
+            # Convert UTC to ET (NBA season is mostly EST, UTC-5)
+            et_dt = utc_dt - td(hours=5)
+            hour = et_dt.hour % 12 or 12
+            ampm = 'PM' if et_dt.hour >= 12 else 'AM'
+            time_str = f"{hour}:{et_dt.minute:02d} {ampm} ET"
+        except Exception:
+            continue
+        game_times[f"{away} @ {home}"] = time_str
+
+    return game_times
+
+
+def get_premium_link():
+    """Get premium access link from env or default."""
+    import os
+    url = os.getenv('DISCORD_INVITE_URL', '')
+    return url if url else 'DM for access'
+
 
 def get_star_players(conn):
     """Get set of star player names (high minutes, starters)."""
@@ -239,9 +290,10 @@ def get_prop_picks(conn, target_date, min_games=20):
     return picks
 
 
-def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
+def generate_predictions_csv(conn, target_date, prop_picks, spread_picks, game_times=None):
     """Generate predictions spreadsheet with all bet types."""
     filepath = PREDICTIONS_DIR / f"picks_{target_date}.csv"
+    game_times = game_times or {}
 
     rows = []
 
@@ -272,6 +324,7 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                 'season_avg': '',
                 'tier': tier,
                 'confidence': confidence,
+                'game_time': game_times.get(g['game'], ''),
             })
 
         if g.get('total_pick'):
@@ -288,6 +341,7 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                 'season_avg': '',
                 'tier': g.get('total_tier', ''),
                 'confidence': 'MEDIUM',
+                'game_time': game_times.get(g['game'], ''),
             })
 
         # Add ML info - ONLY for home team plays with 7+ edge
@@ -308,6 +362,7 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
                     'season_avg': '',
                     'tier': 'PLATINUM' if abs(g.get('spread_edge', 0)) >= 7 else '',
                     'confidence': 'HIGH',
+                    'game_time': game_times.get(g['game'], ''),
                 })
 
     # Add prop picks with PLATINUM/GOLD/SILVER tiers based on edge
@@ -315,6 +370,7 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
         direction = 'OVER' if p['edge'] > 0 else 'UNDER'
         team = p.get('team', '?')
         edge_abs = abs(p['edge_pct'])
+        stat_name = expand_stat(p['stat'])
 
         # Prop tier based on edge percentage
         if edge_abs >= 25:
@@ -326,12 +382,19 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
         else:
             prop_tier = 'BRONZE'
 
+        # Find game time for this player's matchup
+        prop_game_time = ''
+        for game_key, t in game_times.items():
+            if p['opponent'] in game_key or team in game_key:
+                prop_game_time = t
+                break
+
         rows.append({
             'date': target_date,
             'game': f"{team} vs {p['opponent']}",
             'bet_type': 'PROP',
             'player': p['player_name'],
-            'pick': f"{direction} {p['line']} {p['stat']}",
+            'pick': f"{direction} {p['line']} {stat_name}",
             'line': p['line'],
             'projection': round(p['projection'], 1),
             'edge': f"{p['edge_pct']:+.1f}%",
@@ -339,12 +402,13 @@ def generate_predictions_csv(conn, target_date, prop_picks, spread_picks):
             'season_avg': round(p['season_avg'], 1),
             'tier': prop_tier,
             'confidence': p['confidence'],
+            'game_time': prop_game_time,
         })
 
     # Write CSV
     if rows:
         fieldnames = ['date', 'game', 'bet_type', 'player', 'pick', 'line', 'projection',
-                      'edge', 'l10_avg', 'season_avg', 'tier', 'confidence']
+                      'edge', 'l10_avg', 'season_avg', 'tier', 'confidence', 'game_time']
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -367,6 +431,7 @@ def get_engagement_stats(conn, target_date, prop_picks, star_players=None):
     Only includes star players (25+ min avg) that people actually know.
     """
     stats_posts = []
+    seen_players = set()
 
     # Get star players if not provided
     if star_players is None:
@@ -511,7 +576,31 @@ def get_engagement_stats(conn, target_date, prop_picks, star_players=None):
                     'matchup_note': f"Avg: {avg_vs_opp:.1f} PRA vs {opponent}"
                 })
 
-    return stats_posts[:8]  # Return top 8 insights
+    # Deduplicate: max 1 insight per player, prioritize most interesting
+    # Priority order: Hot/Cold Streak > vs Opponent History > Soft Defense > Pace > Usage Trend
+    INSIGHT_PRIORITY = {
+        'Hot Streak Alert': 1, 'Cold Streak Alert': 1,
+        'vs': 2,  # prefix match for "vs OPP History"
+        'Soft Defense Matchup': 3,
+        'Matchup Alert': 4, 'Pace Warning': 4,
+        'Usage Trend': 5,
+    }
+
+    def insight_sort_key(post):
+        insight = post['insight']
+        for prefix, priority in INSIGHT_PRIORITY.items():
+            if insight.startswith(prefix):
+                return priority
+        return 99
+
+    stats_posts.sort(key=insight_sort_key)
+    deduped = []
+    for post in stats_posts:
+        if post['player'] not in seen_players:
+            seen_players.add(post['player'])
+            deduped.append(post)
+
+    return deduped[:8]  # Return top 8 insights
 
 
 def generate_social_posts(conn, target_date, prop_picks, spread_picks):
@@ -526,6 +615,9 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     # Get star players for filtering
     star_players = get_star_players(conn)
     print(f"      Star players (25+ min avg): {len(star_players)}")
+
+    # Get game times for display
+    game_times = get_game_times(conn, target_date)
 
     content = []
 
@@ -574,10 +666,39 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
 
         for p in silver_props[:2]:
             direction = 'OVER' if p['edge_pct'] > 0 else 'UNDER'
+            stat_name = expand_stat(p['stat'])
+            opponent = p.get('opponent', '')
+
+            # Find game time for this player's game
+            game_time = ""
+            for game_key, t in game_times.items():
+                if opponent in game_key or p.get('team', '') in game_key:
+                    game_time = f"Tonight {t}"
+                    break
+
+            # Get opponent defensive rank for context
+            matchup_context = ""
+            if opponent:
+                opp_def = conn.execute('''
+                    SELECT (SELECT COUNT(*) + 1 FROM TeamAdvancedStats t2
+                            WHERE t2.def_rating < t1.def_rating) as def_rank
+                    FROM TeamAdvancedStats t1
+                    WHERE team_abbrev = ?
+                    ORDER BY updated_at DESC LIMIT 1
+                ''', (opponent,)).fetchone()
+                if opp_def:
+                    def_rank = opp_def[0]
+                    if def_rank >= 20:
+                        matchup_context = f"vs {opponent} (#{def_rank} ranked defense)"
+
             tweet = f"Free prop pick\n\n"
             tweet += f"{p['player_name']}\n"
-            tweet += f"{direction} {p['line']} {p['stat']}\n\n"
-            tweet += f"L10 avg: {p['l10_avg']:.1f} | Line: {p['line']}\n"
+            tweet += f"{direction} {p['line']} {stat_name}\n"
+            if matchup_context:
+                tweet += f"{matchup_context}\n"
+            if game_time:
+                tweet += f"{game_time}\n"
+            tweet += f"\nL10 avg: {p['l10_avg']:.1f} | Line: {p['line']}\n"
             tweet += f"Edge: {abs(p['edge_pct']):.0f}%\n\n"
             tweet += f"Like + RT for more free picks\n"
             tweet += f"#NBA #PlayerProps #NBABets"
@@ -663,6 +784,11 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
     content.append("=" * 60)
     content.append("")
 
+    # Get earliest game time for urgency
+    earliest_time = ""
+    if game_times:
+        earliest_time = list(game_times.values())[0]  # Already sorted by time
+
     gold_platinum = [g for g in spread_picks if g.get('spread_tier') in ['GOLD', 'PLATINUM']]
     if gold_platinum:
         content.append("-" * 50)
@@ -670,13 +796,14 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
         content.append("-" * 50)
         content.append("")
 
-        tweet = f"Today's GOLD/PLATINUM picks\n\n"
+        time_suffix = f" ({earliest_time})" if earliest_time else ""
+        tweet = f"Today's GOLD/PLATINUM picks{time_suffix}\n\n"
         for g in gold_platinum[:2]:
             # Don't reveal the actual pick, just tease
             game = g['game']
             tweet += f"{game} - {g.get('spread_tier')} rated\n"
         tweet += f"\nModel edge: {abs(gold_platinum[0].get('spread_edge', 0)):.1f}+ pts\n\n"
-        tweet += f"Get picks: [link]\n"
+        tweet += f"Get picks: {get_premium_link()}\n"
         tweet += f"#NBA #NBABets #PremiumPicks"
         content.append(tweet)
         content.append("")
@@ -689,13 +816,14 @@ def generate_social_posts(conn, target_date, prop_picks, spread_picks):
         content.append("-" * 50)
         content.append("")
 
-        tweet = f"Today's GOLD/PLATINUM player props\n\n"
+        time_suffix = f" ({earliest_time})" if earliest_time else ""
+        tweet = f"Today's GOLD/PLATINUM player props{time_suffix}\n\n"
         for p in star_props[:3]:
             # Tease the player, not the full pick
             tier = 'PLATINUM' if abs(p['edge_pct']) >= 25 else 'GOLD'
             tweet += f"{p['player_name']} ({tier}) - Edge: {abs(p['edge_pct']):.0f}%\n"
         tweet += f"\nOur model vs Vegas lines\n"
-        tweet += f"Get full picks: [link]\n\n"
+        tweet += f"Get full picks: {get_premium_link()}\n\n"
         tweet += f"#NBA #PlayerProps #NBABets"
         content.append(tweet)
         content.append("")
@@ -915,9 +1043,14 @@ def main():
     print(f"      Props: {len(prop_picks)} total (PLATINUM: {plat_count}, GOLD: {gold_count}, SILVER: {silver_count})")
     print()
 
+    # Get game times for output
+    game_times = get_game_times(conn, target_date)
+    if game_times:
+        print(f"      Game times: {len(game_times)} found")
+
     # Generate predictions spreadsheet
     print("[3/4] Generating predictions spreadsheet...")
-    pred_file, pred_rows = generate_predictions_csv(conn, target_date, prop_picks, spread_picks)
+    pred_file, pred_rows = generate_predictions_csv(conn, target_date, prop_picks, spread_picks, game_times)
     print(f"      Saved: {pred_file}")
     print(f"      Total picks: {len(pred_rows)}")
     print()

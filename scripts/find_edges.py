@@ -182,8 +182,8 @@ def get_dvp_rank(opponent, position, stat, conn):
 def get_player_season_games(player_name, conn):
     """Get number of games player has played this season."""
     df = pd.read_sql("""
-        SELECT COUNT(*) as games FROM player_game_logs
-        WHERE player_name = ?
+        SELECT COUNT(DISTINCT game_id) as games FROM PlayerBox
+        WHERE player_name = ? AND min > 0
     """, conn, params=(player_name,))
     return df.iloc[0]["games"]
 
@@ -317,11 +317,12 @@ def save_edges_to_db(edges, conn):
 RESULTS_CSV = PROJECT_ROOT / 'data' / 'results.csv'
 
 
-def log_s_tier_props(edges, target_date, max_picks=5):
+def log_s_tier_props(edges, target_date, max_picks=5, conn=None):
     """
     Log top S_TIER HIGH confidence props to results.csv.
 
     Only logs the best picks (limited to max_picks).
+    Only logs STAR players (25+ min avg) - no bench players.
     """
     import csv
 
@@ -330,6 +331,23 @@ def log_s_tier_props(edges, target_date, max_picks=5):
 
     if not s_tier_high:
         return 0
+
+    # Filter to star players (25+ min avg) if we have a connection
+    if conn is not None:
+        star_players = set()
+        for row in conn.execute('''
+            SELECT player_name FROM PlayerBox
+            WHERE min > 0
+            GROUP BY player_name
+            HAVING COUNT(*) >= 10 AND AVG(min) >= 25
+        ''').fetchall():
+            star_players.add(row[0])
+
+        before = len(s_tier_high)
+        s_tier_high = [e for e in s_tier_high if e['player_name'] in star_players]
+        filtered = before - len(s_tier_high)
+        if filtered:
+            print(f"[AUTO-LOG] Filtered out {filtered} bench player(s) (< 25 min avg)")
 
     # Sort by edge% and take top picks
     s_tier_high.sort(key=lambda x: abs(x.get('edge_pct', 0)), reverse=True)
@@ -617,8 +635,8 @@ def main():
         print(f"HIGH: {high} | MEDIUM: {med} | LOW: {low}")
         print(f"S_TIER picks: {len(s_tier_edges)}")
 
-        # Auto-log S_TIER picks to results.csv
-        log_s_tier_props(edges, target_date)
+        # Auto-log S_TIER picks to results.csv (star players only)
+        log_s_tier_props(edges, target_date, conn=conn)
 
         if args.save:
             count = save_edges_to_db(edges, conn)

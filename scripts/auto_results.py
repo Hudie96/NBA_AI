@@ -37,6 +37,7 @@ ESPN_TO_STD = {
 }
 
 # Stat column mapping for prop resolution
+# NOTE: Keep in sync with STAT_COLS in scripts/project_props.py (used for projections)
 STAT_MAP = {
     'PTS': ['pts'],
     'REB': ['reb'],

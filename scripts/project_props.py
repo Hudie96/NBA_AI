@@ -44,6 +44,7 @@ STATS_EXTENDED = [
 ]
 
 # Column mapping for stats (maps to PlayerBox columns)
+# NOTE: Keep in sync with STAT_MAP in scripts/auto_results.py (used for result resolution)
 STAT_COLS = {
     "PTS": "pts",
     "REB": "reb",
