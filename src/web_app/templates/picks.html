@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}AXIOM - Picks{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2 class="mb-3">Daily Picks</h2>
+
+    <!-- Date Navigation -->
+    <nav aria-label="Date navigation" class="mb-4">
+        <ul class="pagination justify-content-center">
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('picks', date=prev_date) }}">&lt;&lt;</a>
+            </li>
+            <li class="page-item active">
+                <span class="page-link">{{ query_date_display }}</span>
+            </li>
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('picks', date=next_date) }}">&gt;&gt;</a>
+            </li>
+        </ul>
+    </nav>
+
+    {% if not spreads and not props %}
+    <div class="alert alert-info">No picks generated for {{ query_date }}. Run the daily pipeline first.</div>
+    {% endif %}
+
+    <!-- Tier Filter Buttons -->
+    {% if spreads or props %}
+    <div class="mb-3">
+        <button class="btn btn-sm btn-outline-secondary tier-filter active" data-tier="ALL">ALL</button>
+        <button class="btn btn-sm btn-outline-secondary tier-filter" data-tier="PLATINUM">PLATINUM</button>
+        <button class="btn btn-sm btn-outline-secondary tier-filter" data-tier="GOLD">GOLD</button>
+        <button class="btn btn-sm btn-outline-secondary tier-filter" data-tier="SILVER">SILVER</button>
+    </div>
+    {% endif %}
+
+    <!-- SPREADS Section -->
+    {% if spreads %}
+    <h4 class="mt-4 mb-3">Spreads</h4>
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead class="table-dark">
+                <tr>
+                    <th>Game</th>
+                    <th>Pick</th>
+                    <th>Line</th>
+                    <th>Edge</th>
+                    <th>Tier</th>
+                    <th>Confidence</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pick in spreads %}
+                <tr class="pick-row" data-tier="{{ pick.tier }}">
+                    <td>{{ pick.game }}</td>
+                    <td class="fw-bold">{{ pick.pick }}</td>
+                    <td>{{ pick.line }}</td>
+                    <td>{{ pick.edge }}</td>
+                    <td><span class="tier-badge tier-{{ pick.tier|lower }}">{{ pick.tier }}</span></td>
+                    <td>{{ pick.confidence }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <!-- PROPS Section -->
+    {% if props %}
+    <h4 class="mt-4 mb-3">Player Props</h4>
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead class="table-dark">
+                <tr>
+                    <th>Game</th>
+                    <th>Player</th>
+                    <th>Pick</th>
+                    <th>Line</th>
+                    <th>Projection</th>
+                    <th>L10 Avg</th>
+                    <th>Edge</th>
+                    <th>Tier</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pick in props %}
+                <tr class="pick-row" data-tier="{{ pick.tier }}">
+                    <td>{{ pick.game }}</td>
+                    <td class="fw-bold">{{ pick.player }}</td>
+                    <td>{{ pick.pick }}</td>
+                    <td>{{ pick.line }}</td>
+                    <td>{{ pick.projection }}</td>
+                    <td>{{ pick.l10_avg }}</td>
+                    <td>{{ pick.edge }}</td>
+                    <td><span class="tier-badge tier-{{ pick.tier|lower }}">{{ pick.tier }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.tier-filter').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.tier-filter').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        const tier = this.dataset.tier;
+        document.querySelectorAll('.pick-row').forEach(row => {
+            if (tier === 'ALL' || row.dataset.tier === tier) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

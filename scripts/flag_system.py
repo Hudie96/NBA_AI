@@ -1,16 +1,16 @@
 """
 Flag System for AI Review
 
-BACKTEST-VALIDATED SYSTEM (518 games, Oct 2025 - Jan 2026):
+BACKTEST-VALIDATED SYSTEM (559 games, Oct 2025 - Feb 2026):
 
 The model excels at finding undervalued HOME teams, but fails at away teams.
-Only bet when model likes HOME more than Vegas by 5+ points.
+Only bet when model likes HOME more than Vegas by 3+ points in GREEN zone.
 
 TIERS:
-- PLATINUM (84.4%): GREEN zone + Model +7 vs Vegas on HOME (38-7, +61% ROI)
-- GOLD (78.9%): GREEN zone + Model +5 vs Vegas on HOME (56-15, +51% ROI)
-- SILVER (74.4%): Model +5 vs Vegas on HOME, any zone (99-34, +42% ROI)
-- SKIP: Model favors away, or edge < 5 (losing strategy)
+- PLATINUM (88.9%): GREEN zone + Model +7 vs Vegas on HOME (8-1, +69.7% ROI)
+- GOLD (82.4%): GREEN zone + Model +5 vs Vegas on HOME (14-3, +57.2% ROI)
+- SILVER (69.2%): GREEN zone + Model +3 vs Vegas on HOME (9-4, +32.2% ROI)
+- SKIP: Model favors away (43.4%), or edge < 3
 
 GREEN zone = Small spread (<3) OR B2B situation
 """
@@ -83,11 +83,11 @@ def categorize_game(prediction: Dict) -> Tuple[str, Optional[float]]:
     """
     Categorize a game into PLATINUM/GOLD/SILVER/SKIP.
 
-    Based on backtest (518 games, Oct 2025 - Jan 2026):
-    - PLATINUM: GREEN + Model +7 vs Vegas on HOME = 84.4% (38-7)
-    - GOLD: GREEN + Model +5 vs Vegas on HOME = 78.9% (56-15)
-    - SILVER: Model +5 vs Vegas on HOME = 74.4% (99-34)
-    - SKIP: Everything else (model likes away, or edge < 5)
+    Based on full-season backtest (559 games, Oct 2025 - Feb 2026):
+    - PLATINUM: GREEN + Model +7 vs Vegas on HOME = 88.9% (8-1, +69.7% ROI)
+    - GOLD: GREEN + Model +5 vs Vegas on HOME = 82.4% (14-3, +57.2% ROI)
+    - SILVER: GREEN + Model +3 vs Vegas on HOME = 69.2% (9-4, +32.2% ROI)
+    - SKIP: Away picks (43.4%) or edge < 3
 
     Returns:
         Tuple of (zone, edge_vs_vegas)
@@ -112,7 +112,7 @@ def categorize_game(prediction: Dict) -> Tuple[str, Optional[float]]:
         return "PLATINUM", edge
     elif edge >= 5 and green:
         return "GOLD", edge
-    elif edge >= 5:
+    elif edge >= 3 and green:
         return "SILVER", edge
     else:
         return "SKIP", edge
@@ -121,17 +121,19 @@ def categorize_game(prediction: Dict) -> Tuple[str, Optional[float]]:
 def get_zone_stats() -> Dict[str, str]:
     """Return historical win rates for each zone."""
     return {
-        'PLATINUM': '84.4% (38-7 in backtest, +61% ROI)',
-        'GOLD': '78.9% (56-15 in backtest, +51% ROI)',
-        'SILVER': '74.4% (99-34 in backtest, +42% ROI)',
+        'PLATINUM': '88.9% (8-1 in backtest, +69.7% ROI)',
+        'GOLD': '82.4% (14-3 in backtest, +57.2% ROI)',
+        'SILVER': '69.2% (9-4 in backtest, +32.2% ROI)',
         'SKIP': 'No edge or negative edge - do not bet'
     }
 
 
 def log_flagged_pick(prediction: Dict, target_date: str, zone: str, edge: float) -> bool:
     """
-    Log a PLATINUM/GOLD/SILVER pick to results.csv.
+    Log a PLATINUM/GOLD/SILVER pick to results.csv using canonical format.
     """
+    CANONICAL_FIELDS = ['date', 'game', 'bet_type', 'pick', 'line', 'vegas_line', 'tier', 'edge', 'result', 'actual']
+
     game_str = f"{prediction['away_team']} @ {prediction['home_team']}"
 
     # Check for duplicate
@@ -145,26 +147,26 @@ def log_flagged_pick(prediction: Dict, target_date: str, zone: str, edge: float)
     row = {
         'date': target_date,
         'game': game_str,
+        'bet_type': 'SPREAD',
         'pick': pick_str,
-        'spread': prediction['spread'],
-        'zone': zone,
-        'edge_vs_vegas': round(edge, 1) if edge else 0,
-        'vegas_spread': prediction.get('vegas_spread'),
+        'line': prediction['spread'],
+        'vegas_line': prediction.get('vegas_spread', ''),
+        'tier': zone,
+        'edge': f"+{edge:.1f}" if edge else '0',
         'result': '',
-        'margin': '',
-        'clv': ''
+        'actual': ''
     }
 
     # Ensure CSV exists with headers
     if not RESULTS_CSV.exists():
         RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
         with open(RESULTS_CSV, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=row.keys())
+            writer = csv.DictWriter(f, fieldnames=CANONICAL_FIELDS)
             writer.writeheader()
 
     # Append the row
     with open(RESULTS_CSV, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
+        writer = csv.DictWriter(f, fieldnames=CANONICAL_FIELDS)
         writer.writerow(row)
 
     return True

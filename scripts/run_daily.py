@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import sqlite3
@@ -140,6 +141,7 @@ def main():
     parser.add_argument("--skip-verify", action="store_true", help="Skip AI verification step")
     parser.add_argument("--skip-output", action="store_true", help="Skip output generation")
     parser.add_argument("--skip-data-check", action="store_true", help="Skip data verification step")
+    parser.add_argument("--results", action="store_true", help="Run auto-results collection after pipeline")
     args = parser.parse_args()
 
     target_date = args.date or date.today().isoformat()
@@ -200,6 +202,14 @@ def main():
     if not args.skip_output:
         output_args = ["--date", target_date, "--skip-betting"]
         run_script("generate_daily_output.py", output_args, required=False)
+
+    # Step 6: Discord posting (if webhook configured)
+    if os.getenv('DISCORD_WEBHOOK_URL'):
+        run_script("discord_poster.py", ["--picks", "--date", target_date], required=False)
+
+    # Step 7: Auto-results collection (with --results flag)
+    if args.results:
+        run_script("auto_results.py", ["--date", target_date], required=False)
 
     # Summary
     print("\n" + "="*60)

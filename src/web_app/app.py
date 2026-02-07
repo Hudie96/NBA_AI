@@ -18,9 +18,12 @@ Usage:
 Typically run via a entry point in the root directory of the project.
 """
 
+import csv
 import logging
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from flask import Flask, flash, jsonify, render_template, request
 
@@ -33,6 +36,10 @@ from src.web_app.game_data_processor import get_user_datetime, process_game_data
 # Configuration variables
 DB_PATH = config["database"]["path"]
 WEB_APP_SECRET_KEY = config["web_app"]["secret_key"]
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+PREDICTIONS_DIR = PROJECT_ROOT / "outputs" / "predictions"
+PERFORMANCE_DIR = PROJECT_ROOT / "outputs" / "performance"
+RESULTS_CSV = PROJECT_ROOT / "data" / "results.csv"
 
 
 def create_app(predictor):
@@ -177,6 +184,139 @@ def create_app(predictor):
                 jsonify({"error": f"Unable to fetch game data: {str(e)}"}),
                 500,
             )
+
+    @app.route("/picks")
+    def picks():
+        """Renders the picks page with today's or queried date's picks."""
+        current_date_local = get_user_datetime(as_eastern_tz=False)
+        current_date_str = current_date_local.strftime("%Y-%m-%d")
+        query_date_str = request.args.get("date", current_date_str)
+
+        try:
+            validate_date_format(query_date_str)
+            query_date = datetime.strptime(query_date_str, "%Y-%m-%d")
+        except Exception:
+            flash("Invalid date format. Showing picks for today.", "error")
+            query_date_str = current_date_str
+            query_date = current_date_local
+
+        next_date = (query_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        prev_date = (query_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Read picks CSV
+        picks_file = PREDICTIONS_DIR / f"picks_{query_date_str}.csv"
+        spreads = []
+        props = []
+
+        if picks_file.exists():
+            with open(picks_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    bet_type = row.get('bet_type', '')
+                    tier = row.get('tier', '')
+                    if tier == 'SKIP':
+                        continue
+                    if bet_type == 'SPREAD':
+                        spreads.append(row)
+                    elif bet_type == 'PROP':
+                        props.append(row)
+
+        return render_template(
+            "picks.html",
+            query_date=query_date_str,
+            query_date_display=query_date.strftime("%b %d, %Y"),
+            prev_date=prev_date,
+            next_date=next_date,
+            spreads=spreads,
+            props=props,
+        )
+
+    @app.route("/performance")
+    def performance():
+        """Renders the performance dashboard with running record."""
+        stats = None
+        daily_rows = []
+
+        if RESULTS_CSV.exists():
+            with open(RESULTS_CSV, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                results = [r for r in reader if r.get('result') in ['W', 'L']]
+
+            if results:
+                # Calculate stats
+                spread_w = sum(1 for r in results if r.get('bet_type') == 'SPREAD' and r['result'] == 'W')
+                spread_l = sum(1 for r in results if r.get('bet_type') == 'SPREAD' and r['result'] == 'L')
+                prop_w = sum(1 for r in results if r.get('bet_type', 'PROP') == 'PROP' and r['result'] == 'W')
+                prop_l = sum(1 for r in results if r.get('bet_type', 'PROP') == 'PROP' and r['result'] == 'L')
+                total_w = spread_w + prop_w
+                total_l = spread_l + prop_l
+
+                def calc_pct(w, l):
+                    return (w / (w + l) * 100) if (w + l) > 0 else 0
+
+                def calc_roi(w, l):
+                    profit = (w * 100) - (l * 110)
+                    risked = (w + l) * 110
+                    return (profit / risked * 100) if risked > 0 else 0
+
+                # Current streak
+                sorted_results = sorted(results, key=lambda x: x['date'], reverse=True)
+                streak = 0
+                streak_type = sorted_results[0]['result']
+                for r in sorted_results:
+                    if r['result'] == streak_type:
+                        streak += 1
+                    else:
+                        break
+
+                stats = {
+                    'total_w': total_w, 'total_l': total_l,
+                    'total_pct': calc_pct(total_w, total_l),
+                    'total_roi': calc_roi(total_w, total_l),
+                    'spread_w': spread_w, 'spread_l': spread_l,
+                    'spread_pct': calc_pct(spread_w, spread_l),
+                    'spread_roi': calc_roi(spread_w, spread_l),
+                    'prop_w': prop_w, 'prop_l': prop_l,
+                    'prop_pct': calc_pct(prop_w, prop_l),
+                    'prop_roi': calc_roi(prop_w, prop_l),
+                    'streak': streak, 'streak_type': streak_type,
+                }
+
+                # Daily breakdown
+                daily = defaultdict(lambda: {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}})
+                for r in results:
+                    bt = r.get('bet_type', 'PROP')
+                    if bt not in ('SPREAD', 'PROP'):
+                        bt = 'PROP'
+                    daily[r['date']][bt][r['result']] += 1
+
+                cum = {'SPREAD': {'W': 0, 'L': 0}, 'PROP': {'W': 0, 'L': 0}}
+                for dt in sorted(daily.keys()):
+                    d = daily[dt]
+                    cum['SPREAD']['W'] += d['SPREAD']['W']
+                    cum['SPREAD']['L'] += d['SPREAD']['L']
+                    cum['PROP']['W'] += d['PROP']['W']
+                    cum['PROP']['L'] += d['PROP']['L']
+
+                    day_w = d['SPREAD']['W'] + d['PROP']['W']
+                    day_l = d['SPREAD']['L'] + d['PROP']['L']
+                    cum_w = cum['SPREAD']['W'] + cum['PROP']['W']
+                    cum_l = cum['SPREAD']['L'] + cum['PROP']['L']
+
+                    daily_rows.append({
+                        'date': dt,
+                        'spread_daily': f"{d['SPREAD']['W']}-{d['SPREAD']['L']}",
+                        'prop_daily': f"{d['PROP']['W']}-{d['PROP']['L']}",
+                        'total_daily': f"{day_w}-{day_l}",
+                        'total_cumulative': f"{cum_w}-{cum_l}",
+                        'total_pct': f"{calc_pct(cum_w, cum_l):.1f}%",
+                    })
+
+        return render_template(
+            "performance.html",
+            stats=stats,
+            daily_rows=daily_rows,
+        )
 
     @app.after_request
     def add_header(response):

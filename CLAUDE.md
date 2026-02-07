@@ -13,12 +13,12 @@ Two outputs: profitable picks AND engaging content that builds an audience.
 
 ### Tier System
 
-**Spreads:**
-| Tier | Win Rate | Criteria |
-|------|----------|----------|
-| PLATINUM | 84.4% | Model edge +7 pts vs Vegas |
-| GOLD | 78.9% | Model edge +5 pts vs Vegas |
-| SILVER | 74.4% | Model edge +3 pts vs Vegas |
+**Spreads (HOME only, GREEN zone):**
+| Tier | Win Rate | ROI | Criteria |
+|------|----------|-----|----------|
+| PLATINUM | 88.9% | +69.7% | GREEN + Model edge +7 vs Vegas |
+| GOLD | 82.4% | +57.2% | GREEN + Model edge +5 vs Vegas |
+| SILVER | 69.2% | +32.2% | GREEN + Model edge +3 vs Vegas |
 
 **Props (Star Players Only):**
 | Tier | Edge | Description |
@@ -149,6 +149,23 @@ git push
 3. **Verify data** - Cross-check sources before trusting
 4. **Track everything** - Log all picks to results.csv
 5. **PA-legal only** - DraftKings, FanDuel, BetMGM, ESPN BET
+
+## Token Optimization / Model Selection
+
+Use the cheapest model that handles the task well. Opus 4.6 is the new top tier.
+
+| Model | Use For | Cost |
+|-------|---------|------|
+| **Opus 4.6** | Architecture, multi-file refactors, pipeline design, betting strategy, security | $$$ |
+| **Sonnet 4.5** | Feature builds, bug fixes, route/template work, test writing | $$ |
+| **Haiku 4.5** | File searches, syntax checks, simple lookups, CSV formatting | $ |
+
+**AXIOM-specific guidance:**
+- **Opus 4.6**: Backtest analysis, new prediction model design, flag_system tuning, multi-script pipeline changes
+- **Sonnet 4.5**: Adding routes, new scripts, template changes, Discord/API integrations
+- **Haiku 4.5**: Checking results.csv format, verifying column names, quick data validation
+
+**Subagent strategy**: Use Haiku for Explore/search agents, Sonnet for build agents, Opus only for Plan agents on critical decisions.
 
 ## Other Sports Templates
 

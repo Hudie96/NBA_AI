@@ -69,3 +69,49 @@
         display: inline;
     }
 }
+
+/* Tier Badges */
+.tier-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.tier-platinum {
+    background-color: #7B68EE;
+    color: #fff;
+}
+
+.tier-gold {
+    background-color: #FFD700;
+    color: #333;
+}
+
+.tier-silver {
+    background-color: #C0C0C0;
+    color: #333;
+}
+
+.tier-s_tier {
+    background-color: #00FF7F;
+    color: #333;
+}
+
+.tier-skip {
+    background-color: #DC3545;
+    color: #fff;
+}
+
+.tier-bronze {
+    background-color: #CD7F32;
+    color: #fff;
+}
+
+/* Override navbar-text size when using base.html dark navbar */
+.navbar-dark .navbar-brand span {
+    font-size: 1.25rem;
+}
