@@ -203,8 +203,8 @@ def main():
         output_args = ["--date", target_date, "--skip-betting"]
         run_script("generate_daily_output.py", output_args, required=False)
 
-    # Step 6: Discord posting (if webhook configured)
-    if os.getenv('DISCORD_WEBHOOK_URL'):
+    # Step 6: Discord posting (if any webhook configured)
+    if any(os.getenv(k) for k in ['DISCORD_WEBHOOK_PLATINUM', 'DISCORD_WEBHOOK_GOLD', 'DISCORD_WEBHOOK_FREE', 'DISCORD_WEBHOOK_RESULTS']):
         run_script("discord_poster.py", ["--picks", "--date", target_date], required=False)
 
     # Step 7: Auto-results collection (with --results flag)

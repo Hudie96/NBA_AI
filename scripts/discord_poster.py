@@ -1,8 +1,15 @@
 """
-Discord Auto-Poster
+Discord Auto-Poster (Tiered Channels)
 
-Posts daily picks and results to a Discord webhook.
-Reads from picks CSV and results.csv, formats into Discord embeds.
+Posts picks to tier-specific Discord channels:
+  - Platinum channel: PLATINUM picks (full details)
+  - Gold channel: GOLD picks (full details)
+  - Free channel: SILVER spreads + S_TIER props (full details)
+  - Results channel: Results + performance summaries
+
+Env vars:
+  DISCORD_WEBHOOK_PLATINUM, DISCORD_WEBHOOK_GOLD,
+  DISCORD_WEBHOOK_FREE, DISCORD_WEBHOOK_RESULTS
 
 Usage:
     python scripts/discord_poster.py --picks                     # Post today's picks
@@ -23,36 +30,53 @@ import requests
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 RESULTS_CSV = PROJECT_ROOT / 'data' / 'results.csv'
 PREDICTIONS_DIR = PROJECT_ROOT / 'outputs' / 'predictions'
 PERFORMANCE_DIR = PROJECT_ROOT / 'outputs' / 'performance'
 
 # Tier colors for embeds
 TIER_COLORS = {
-    'PLATINUM': 0x7B68EE,  # Medium slate blue
-    'GOLD': 0xFFD700,      # Gold
-    'SILVER': 0xC0C0C0,    # Silver
-    'S_TIER': 0x00FF7F,    # Spring green
-    'FREE': 0x2ECC71,      # Green
-    'PREMIUM': 0xF39C12,   # Orange
-    'RESULTS': 0x3498DB,   # Blue
-    'PERFORMANCE': 0x9B59B6,  # Purple
+    'PLATINUM': 0x7B68EE,
+    'GOLD': 0xFFD700,
+    'SILVER': 0xC0C0C0,
+    'S_TIER': 0x00FF7F,
+    'RESULTS': 0x3498DB,
+    'PERFORMANCE': 0x9B59B6,
 }
+
+
+def get_webhooks():
+    """Load tier-specific webhook URLs from env."""
+    return {
+        'PLATINUM': os.getenv('DISCORD_WEBHOOK_PLATINUM'),
+        'GOLD': os.getenv('DISCORD_WEBHOOK_GOLD'),
+        'FREE': os.getenv('DISCORD_WEBHOOK_FREE'),
+        'RESULTS': os.getenv('DISCORD_WEBHOOK_RESULTS'),
+    }
 
 
 def send_webhook(webhook_url, embeds, username="Axiom Sports"):
     """Send embeds to Discord webhook."""
     if not webhook_url:
-        print("[WARN] No DISCORD_WEBHOOK_URL set, printing instead")
+        print("[WARN] No webhook URL for this channel, printing instead")
         for embed in embeds:
             print(f"\n--- {embed.get('title', 'Embed')} ---")
+            if embed.get('description'):
+                print(f"  {embed['description']}")
             for field in embed.get('fields', []):
                 print(f"  {field['name']}: {field['value']}")
         return False
 
     payload = {
         "username": username,
-        "embeds": embeds[:10]  # Discord limit: 10 embeds per message
+        "embeds": embeds[:10]
     }
 
     try:
@@ -61,12 +85,42 @@ def send_webhook(webhook_url, embeds, username="Axiom Sports"):
         print(f"[SUCCESS] Posted {len(embeds)} embed(s) to Discord")
         return True
     except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Failed to post to Discord: {e}")
+        print(f"[ERROR] Failed to post to Discord: {type(e).__name__}")
         return False
 
 
-def post_daily_picks(target_date, webhook_url):
-    """Post daily picks to Discord. Free picks (SILVER) shown in full, premium teased."""
+def _build_spread_field(row):
+    """Build embed field for a spread pick."""
+    return {
+        "name": f"SPREAD | {row['game']}",
+        "value": f"**{row['pick']}**\nEdge: {row.get('edge', 'N/A')} | Vegas: {row.get('vegas_line', 'N/A')}",
+        "inline": False
+    }
+
+
+def _build_prop_field(row):
+    """Build embed field for a prop pick."""
+    return {
+        "name": f"PROP | {row.get('player', row.get('pick', ''))}",
+        "value": f"**{row['pick']}**\nL10: {row.get('l10_avg', '')} | Edge: {row.get('edge', '')}",
+        "inline": False
+    }
+
+
+def _build_embed(title, description, color, fields, footer_text="AXIOM | Data-Driven NBA Picks"):
+    """Build a Discord embed dict."""
+    return {
+        "title": title,
+        "description": description,
+        "color": color,
+        "fields": fields[:25],
+        "footer": {"text": footer_text},
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+def post_daily_picks(target_date, webhooks):
+    """Post daily picks to tier-specific Discord channels."""
     picks_file = PREDICTIONS_DIR / f"picks_{target_date}.csv"
 
     if not picks_file.exists():
@@ -81,71 +135,110 @@ def post_daily_picks(target_date, webhook_url):
         print("No picks found")
         return False
 
-    # Separate by tier
-    spreads = [r for r in rows if r.get('bet_type') == 'SPREAD' and r.get('tier') != 'SKIP']
-    props = [r for r in rows if r.get('bet_type') == 'PROP']
+    # Categorize picks
+    platinum_picks = [r for r in rows if r.get('tier') == 'PLATINUM']
+    gold_picks = [r for r in rows if r.get('tier') == 'GOLD']
+    silver_picks = [r for r in rows if r.get('tier') in ('SILVER', 'S_TIER')]
+    posted = False
 
-    silver_spreads = [r for r in spreads if r.get('tier') == 'SILVER']
-    silver_props = [r for r in props if r.get('tier') == 'SILVER']
-    premium_spreads = [r for r in spreads if r.get('tier') in ('GOLD', 'PLATINUM')]
-    premium_props = [r for r in props if r.get('tier') in ('GOLD', 'PLATINUM')]
-
-    embeds = []
-
-    # Free picks embed (SILVER tier - full details)
-    if silver_spreads or silver_props:
+    # --- PLATINUM channel ---
+    if platinum_picks:
         fields = []
-        for s in silver_spreads[:3]:
-            fields.append({
-                "name": f"SPREAD | {s['game']}",
-                "value": f"**{s['pick']}**\nEdge: {s.get('edge', 'N/A')}",
-                "inline": True
-            })
-        for p in silver_props[:5]:
-            fields.append({
-                "name": f"PROP | {p.get('player', '')}",
-                "value": f"**{p['pick']}**\nL10: {p.get('l10_avg', '')} | Edge: {p.get('edge', '')}",
-                "inline": True
-            })
+        for r in platinum_picks:
+            if r.get('bet_type') == 'SPREAD':
+                fields.append(_build_spread_field(r))
+            else:
+                fields.append(_build_prop_field(r))
 
-        embeds.append({
-            "title": f"FREE PICKS - {target_date}",
-            "description": "SILVER tier picks (full details)",
-            "color": TIER_COLORS['FREE'],
-            "fields": fields,
-            "footer": {"text": "AXIOM | Data-Driven NBA Picks"},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        embed = _build_embed(
+            f"PLATINUM PICKS - {target_date}",
+            f"**{len(platinum_picks)} pick(s)** | 88.9% backtest win rate",
+            TIER_COLORS['PLATINUM'],
+            fields
+        )
+        print(f"\n[PLATINUM] {len(platinum_picks)} pick(s)")
+        if send_webhook(webhooks.get('PLATINUM'), [embed]):
+            posted = True
 
-    # Premium teaser embed (GOLD/PLATINUM - counts only)
-    if premium_spreads or premium_props:
+    # --- GOLD channel ---
+    if gold_picks:
+        fields = []
+        for r in gold_picks:
+            if r.get('bet_type') == 'SPREAD':
+                fields.append(_build_spread_field(r))
+            else:
+                fields.append(_build_prop_field(r))
+
+        embed = _build_embed(
+            f"GOLD PICKS - {target_date}",
+            f"**{len(gold_picks)} pick(s)** | 82.4% backtest win rate",
+            TIER_COLORS['GOLD'],
+            fields
+        )
+        print(f"\n[GOLD] {len(gold_picks)} pick(s)")
+        if send_webhook(webhooks.get('GOLD'), [embed]):
+            posted = True
+
+    # --- FREE channel (SILVER spreads + S_TIER props) ---
+    if silver_picks:
+        fields = []
+        for r in silver_picks:
+            if r.get('bet_type') == 'SPREAD':
+                fields.append(_build_spread_field(r))
+            else:
+                fields.append(_build_prop_field(r))
+
+        embed = _build_embed(
+            f"FREE PICKS - {target_date}",
+            f"**{len(silver_picks)} pick(s)** | Full details below",
+            TIER_COLORS['SILVER'],
+            fields
+        )
+        print(f"\n[FREE] {len(silver_picks)} pick(s)")
+        if send_webhook(webhooks.get('FREE'), [embed]):
+            posted = True
+
+    # --- Also post teasers to FREE channel for premium tiers ---
+    premium_count = len(platinum_picks) + len(gold_picks)
+    if premium_count > 0:
         tease_lines = []
-        if premium_spreads:
-            tease_lines.append(f"**{len(premium_spreads)} SPREAD pick(s)** rated GOLD/PLATINUM")
-        if premium_props:
-            tease_lines.append(f"**{len(premium_props)} PROP pick(s)** rated GOLD/PLATINUM")
-            # Tease player names without picks
-            for p in premium_props[:3]:
-                tier = p.get('tier', '')
-                tease_lines.append(f"  {p.get('player', '')} ({tier}) - Edge: {p.get('edge', '')}")
+        if platinum_picks:
+            tease_lines.append(f"**{len(platinum_picks)} PLATINUM** pick(s)")
+        if gold_picks:
+            tease_lines.append(f"**{len(gold_picks)} GOLD** pick(s)")
+        tease_lines.append("\nUpgrade for full access to premium picks!")
 
-        embeds.append({
-            "title": f"PREMIUM PICKS AVAILABLE - {target_date}",
-            "description": "\n".join(tease_lines),
-            "color": TIER_COLORS['PREMIUM'],
-            "footer": {"text": "Full picks available for premium members"},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        teaser = _build_embed(
+            f"PREMIUM PICKS AVAILABLE - {target_date}",
+            "\n".join(tease_lines),
+            0xF39C12,
+            [],
+            "Upgrade to Gold or Platinum for full picks"
+        )
+        send_webhook(webhooks.get('FREE'), [teaser])
 
-    if not embeds:
-        print("No picks to post (no SILVER or higher tier picks)")
+    if not posted and not silver_picks:
+        print("No picks to post today")
         return False
 
-    return send_webhook(webhook_url, embeds)
+    # Post summary to results channel
+    total = len(platinum_picks) + len(gold_picks) + len(silver_picks)
+    if total > 0:
+        summary = _build_embed(
+            f"DAILY CARD - {target_date}",
+            f"**{total} total pick(s)** posted across channels\n"
+            f"Platinum: {len(platinum_picks)} | Gold: {len(gold_picks)} | Free: {len(silver_picks)}",
+            TIER_COLORS['RESULTS'],
+            [],
+            "Check your tier channel for details"
+        )
+        send_webhook(webhooks.get('RESULTS'), [summary])
+
+    return True
 
 
-def post_results_update(target_date, webhook_url):
-    """Post results for a specific date to Discord."""
+def post_results_update(target_date, webhooks):
+    """Post results to the results channel."""
     if not RESULTS_CSV.exists():
         print("No results.csv found")
         return False
@@ -160,34 +253,40 @@ def post_results_update(target_date, webhook_url):
 
     wins = sum(1 for r in results if r['result'] == 'W')
     losses = sum(1 for r in results if r['result'] == 'L')
+    pushes = sum(1 for r in results if r['result'] == 'P')
 
     fields = []
     for r in results:
-        emoji = "W" if r['result'] == 'W' else "L"
+        result = r['result']
+        emoji = {"W": "W", "L": "L", "P": "P"}.get(result, "?")
         bet_type = r.get('bet_type', 'PROP')
         actual = r.get('actual', '')
+        tier = r.get('tier', '')
         fields.append({
-            "name": f"{emoji} {bet_type} | {r.get('pick', '')}",
+            "name": f"{emoji} {bet_type} [{tier}] | {r.get('pick', '')}",
             "value": f"Actual: {actual}" if actual else "Result recorded",
             "inline": True
         })
 
     color = 0x2ECC71 if wins > losses else 0xE74C3C if losses > wins else 0xF39C12
+    record = f"**{wins}-{losses}**"
+    if pushes:
+        record += f" ({pushes}P)"
 
-    embed = {
-        "title": f"RESULTS - {target_date}",
-        "description": f"**{wins}-{losses}** on the day",
-        "color": color,
-        "fields": fields[:25],  # Discord limit
-        "footer": {"text": "AXIOM | Track Record"},
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    embed = _build_embed(
+        f"RESULTS - {target_date}",
+        f"{record} on the day",
+        color,
+        fields,
+        "AXIOM | Track Record"
+    )
 
+    webhook_url = webhooks.get('RESULTS')
     return send_webhook(webhook_url, [embed])
 
 
-def post_performance_summary(webhook_url):
-    """Post running performance summary to Discord."""
+def post_performance_summary(webhooks):
+    """Post running performance summary to the results channel."""
     if not RESULTS_CSV.exists():
         print("No results.csv found")
         return False
@@ -200,7 +299,6 @@ def post_performance_summary(webhook_url):
         print("No resolved results found")
         return False
 
-    # Calculate totals
     spread_w = sum(1 for r in results if r.get('bet_type') == 'SPREAD' and r['result'] == 'W')
     spread_l = sum(1 for r in results if r.get('bet_type') == 'SPREAD' and r['result'] == 'L')
     prop_w = sum(1 for r in results if r.get('bet_type', 'PROP') == 'PROP' and r['result'] == 'W')
@@ -210,7 +308,6 @@ def post_performance_summary(webhook_url):
     total_l = spread_l + prop_l
     total_pct = (total_w / (total_w + total_l) * 100) if (total_w + total_l) > 0 else 0
 
-    # ROI (-110 juice)
     profit = (total_w * 100) - (total_l * 110)
     risked = (total_w + total_l) * 110
     roi = (profit / risked * 100) if risked > 0 else 0
@@ -222,20 +319,20 @@ def post_performance_summary(webhook_url):
         {"name": "Props", "value": f"{prop_w}-{prop_l}", "inline": True},
     ]
 
-    embed = {
-        "title": "AXIOM PERFORMANCE",
-        "description": f"Running record across {total_w + total_l} graded picks",
-        "color": TIER_COLORS['PERFORMANCE'],
-        "fields": fields,
-        "footer": {"text": "AXIOM | Data-Driven NBA Picks"},
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    embed = _build_embed(
+        "AXIOM PERFORMANCE",
+        f"Running record across {total_w + total_l} graded picks",
+        TIER_COLORS['PERFORMANCE'],
+        fields,
+        "AXIOM | Data-Driven NBA Picks"
+    )
 
+    webhook_url = webhooks.get('RESULTS')
     return send_webhook(webhook_url, [embed])
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Post to Discord')
+    parser = argparse.ArgumentParser(description='Post to Discord (tiered channels)')
     parser.add_argument('--picks', action='store_true', help='Post daily picks')
     parser.add_argument('--results', action='store_true', help='Post results')
     parser.add_argument('--performance', action='store_true', help='Post performance summary')
@@ -243,17 +340,18 @@ def main():
     args = parser.parse_args()
 
     target_date = args.date or date.today().isoformat()
-    webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+    webhooks = get_webhooks()
 
-    if not webhook_url:
-        print("[INFO] DISCORD_WEBHOOK_URL not set - will print output instead of posting")
+    any_webhook = any(webhooks.values())
+    if not any_webhook:
+        print("[INFO] No Discord webhooks configured - will print output instead")
 
     if args.picks:
-        post_daily_picks(target_date, webhook_url)
+        post_daily_picks(target_date, webhooks)
     if args.results:
-        post_results_update(target_date, webhook_url)
+        post_results_update(target_date, webhooks)
     if args.performance:
-        post_performance_summary(webhook_url)
+        post_performance_summary(webhooks)
 
     if not (args.picks or args.results or args.performance):
         print("Specify --picks, --results, or --performance")

@@ -311,14 +311,14 @@ def run_auto_results(target_date=None, dry_run=False):
         except Exception as e:
             print(f"[WARN] Could not update performance tracker: {e}")
 
-        # Post results to Discord if webhook configured
+        # Post results to Discord if webhooks configured
         try:
             import os
-            webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
-            if webhook_url:
-                from scripts.discord_poster import post_results_update
+            if os.getenv('DISCORD_WEBHOOK_RESULTS'):
+                from scripts.discord_poster import get_webhooks, post_results_update
+                webhooks = get_webhooks()
                 for d in dates:
-                    post_results_update(d, webhook_url)
+                    post_results_update(d, webhooks)
         except Exception as e:
             print(f"[WARN] Discord posting failed: {e}")
     elif dry_run:
